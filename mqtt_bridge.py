@@ -6,11 +6,11 @@ from datetime import datetime
 
 import paho.mqtt.client as mqtt
 
-from db import SessionLocal, Device
-
+# ===== Глобальные карты состояния (в памяти) =====
 ONLINE = {}       # device_id -> bool
 CODE_INDEX = {}   # code -> device_id
 
+# ===== Настройки MQTT =====
 MQTT_HOST = "45.144.221.176"
 MQTT_PORT = 1883
 MQTT_USER = "esphkaf"
@@ -31,6 +31,14 @@ def topic_pair(device_id: str) -> str:
 
 def topic_pair_result(device_id: str) -> str:
     return f"devices/{device_id}/pair_result"
+
+# ====== Колбэк из приложения для записи состояния в БД ======
+_state_handler = None  # callable(device_id:str, kind:str, payload:dict|str|None)
+
+def register_state_handler(func):
+    """Приложение регистрирует обработчик, чтобы получать апдейты и писать их в БД."""
+    global _state_handler
+    _state_handler = func
 
 class MqttBridge:
     def __init__(self):
@@ -126,7 +134,7 @@ class MqttBridge:
         client.subscribe("devices/+/state", qos=0)
         client.subscribe("devices/+/availability", qos=0)
         client.subscribe("devices/+/pair_result", qos=0)
-        # индексация по одному коду:
+        # индексация по одному коду (ретейн сообщением):
         client.subscribe("pair/index/+", qos=0)
 
     def _on_disconnect(self, client, userdata, rc):
@@ -134,17 +142,16 @@ class MqttBridge:
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
-        payload = msg.payload.decode("utf-8", errors="ignore")
-        print(f"[MQTT←] {topic} {payload}")
+        payload_raw = msg.payload.decode("utf-8", errors="ignore")
+        print(f"[MQTT←] {topic} {payload_raw}")
 
-        # Индекс: pair/index/<CODE> -> <DEVICE_ID> (ретейн)
+        # Индекс: pair/index/<CODE> -> <DEVICE_ID> (retain)
         if topic.startswith("pair/index/"):
             code = topic[len("pair/index/"):]
-            device_id = (payload or "").strip()
+            device_id = (payload_raw or "").strip()
             if device_id:
                 CODE_INDEX[code] = device_id
             else:
-                # очистка ретейна -> убираем из индекса
                 CODE_INDEX.pop(code, None)
             return
 
@@ -154,47 +161,31 @@ class MqttBridge:
         device_id = parts[1]
         kind = parts[2]
 
+        # Ответ на pairing
         if kind == "pair_result":
             try:
-                data = json.loads(payload or "{}")
+                data = json.loads(payload_raw or "{}")
             except json.JSONDecodeError:
                 data = {}
             self._resolve_waiter(device_id, data)
             return
 
-        ses = SessionLocal()
-        try:
-            dev = ses.query(Device).filter(Device.device_id == device_id).first()
-            if not dev:
-                if kind == "availability":
-                    ONLINE[device_id] = (payload.strip().lower() == "online")
-                elif kind == "state":
-                    ONLINE[device_id] = True
-                return
+        # availability/state — обновление карт и уведомление приложения
+        if kind == "availability":
+            ONLINE[device_id] = (payload_raw.strip().lower() == "online")
+            if _state_handler:
+                _state_handler(device_id, "availability", ONLINE[device_id])
+            return
 
-            if kind == "availability":
-                ONLINE[device_id] = (payload.strip().lower() == "online")
-                if ONLINE[device_id]:
-                    dev.last_seen = datetime.utcnow()
-                    ses.add(dev)
-                    ses.commit()
-                return
-
-            if kind == "state":
-                ONLINE[device_id] = True
-                try:
-                    data = json.loads(payload or "{}")
-                except json.JSONDecodeError:
-                    return
-                if "on" in data:
-                    dev.on_state = bool(data["on"])
-                if isinstance(data.get("program"), str):
-                    dev.program = data["program"]
-                dev.last_seen = datetime.utcnow()
-                ses.add(dev)
-                ses.commit()
-        finally:
-            ses.close()
+        if kind == "state":
+            ONLINE[device_id] = True
+            try:
+                data = json.loads(payload_raw or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            if _state_handler:
+                _state_handler(device_id, "state", data)
+            return
 
 
 bridge = MqttBridge()

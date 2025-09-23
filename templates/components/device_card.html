@@ -111,10 +111,20 @@ backlight=False) %}
 
 {# ================= С У Ш И Л Ь Н Ы Й Ш К А Ф ================= #}
 {% macro dryer_card(id, title, online=True, power=False,
-program_options=[], program_value=None,
+program_value=None,
 sound=False,
 temp_c=None,
 time_left=None) %}
+
+{% set program_options = [
+    ('standard', 'Стандартный'),
+    ('smart', 'Умный'),
+    ('fast', 'Быстрая сушка'),
+    ('no_heat', 'Без нагрева'),
+    ('personal', 'Персональный'),
+    ('easy_iron', 'Легкая глажка')
+] %}
+
 <div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col" 
      data-device-id="{{ id }}" data-device-kind="dryer">
 
