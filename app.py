@@ -428,14 +428,109 @@ def api_devices_manual_add():
 
     return jsonify(ok=True, device_id=device_id, kind=kind, name=device_name)
 
+def _get_user_device(device_id: str):
+    if not g.user:
+        return None
+    with db() as con:
+        row = con.execute(
+            "SELECT device_id, kind, name FROM devices WHERE user_id=? AND device_id=?",
+            (g.user["id"], device_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def _update_device_field(device_id: str, field: str, value):
+    with db() as con:
+        con.execute(f"UPDATE devices SET {field}=? WHERE device_id=?", (value, device_id))
+
+
+@app.post("/api/device/<device_id>/power")
+@login_required
+def api_device_power(device_id):
+    device = _get_user_device(device_id)
+    if not device:
+        return jsonify(ok=False, message="Устройство не найдено"), 404
+
+    if not request.is_json:
+        return jsonify(ok=False, message="Тело должно быть JSON"), 400
+
+    data = request.get_json(silent=True) or {}
+    if "on" not in data:
+        return jsonify(ok=False, message="Параметр 'on' обязателен"), 400
+
+    on_value = data["on"]
+    if isinstance(on_value, str):
+        on_state = on_value.strip().lower() in {"1", "true", "on"}
+    else:
+        on_state = bool(on_value)
+
+    try:
+        bridge.publish_cmd(device_id, {"on": on_state})
+    except Exception as e:
+        return jsonify(ok=False, message=f"MQTT ошибка: {e}"), 502
+
+    _update_device_field(device_id, "on_state", 1 if on_state else 0)
+    return jsonify(ok=True)
+
+
+@app.post("/api/device/<device_id>/set")
+@login_required
+def api_device_set(device_id):
+    device = _get_user_device(device_id)
+    if not device:
+        return jsonify(ok=False, message="Устройство не найдено"), 404
+
+    if not request.is_json:
+        return jsonify(ok=False, message="Тело должно быть JSON"), 400
+
+    data = request.get_json(silent=True) or {}
+    items = list(data.items())
+    if not items:
+        return jsonify(ok=False, message="Не переданы параметры"), 400
+
+    key, value = items[0]
+
+    try:
+        bridge.publish_cmd(device_id, {key: value})
+    except Exception as e:
+        return jsonify(ok=False, message=f"MQTT ошибка: {e}"), 502
+
+    if key in {"program", "mode"} and isinstance(value, str):
+        _update_device_field(device_id, "program", value)
+
+    return jsonify(ok=True)
+
+
+@app.post("/api/device/<device_id>/rename")
+@login_required
+def api_device_rename(device_id):
+    device = _get_user_device(device_id)
+    if not device:
+        return jsonify(ok=False, message="Устройство не найдено"), 404
+
+    if not request.is_json:
+        return jsonify(ok=False, message="Тело должно быть JSON"), 400
+
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify(ok=False, message="Имя устройства не может быть пустым"), 400
+
+    with db() as con:
+        con.execute(
+            "UPDATE devices SET name=? WHERE user_id=? AND device_id=?",
+            (title, g.user["id"], device_id),
+        )
+
+    return jsonify(ok=True, title=title)
+
+
 @app.post("/api/device/<device_id>/cmd")
 @login_required
 def api_device_cmd(device_id):
-    with db() as con:
-        row = con.execute("SELECT 1 FROM devices WHERE user_id=? AND device_id=?",
-                          (g.user["id"], device_id)).fetchone()
-        if not row:
-            return jsonify(ok=False, message="Устройство не найдено"), 404
+    device = _get_user_device(device_id)
+    if not device:
+        return jsonify(ok=False, message="Устройство не найдено"), 404
 
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
