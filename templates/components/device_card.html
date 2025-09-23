@@ -1,0 +1,235 @@
+{# templates/components/device_card.html #}
+
+{# ===================== К А М И Н ===================== #}
+{% macro fireplace_card(id, title, online=True, power=False,
+mode_options=[], mode_value=None,
+sound_options=[], sound_value=None,
+backlight=False) %}
+<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col" 
+     data-device-id="{{ id }}" data-device-kind="fireplace">
+
+    <!-- Заголовок -->
+    <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"></div>
+            <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
+            <span class="text-xs text-neutral-400">{{ 'онлайн' if online else 'оффлайн' }}</span>
+        </div>
+        <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" stroke-width="1.6" />
+                <path
+                    d="M19 12a7 7 0 0 0-.07-.96l2.06-1.6-2-3.46-2.47.86a7.07 7.07 0 0 0-1.66-.96L14.5 3h-5l-.36 2.9a7.07 7.07 0 0 0-1.66.96l-2.47-.86-2 3.46 2.06 1.6A7 7 0 0 0 5 12c0 .33.02.65.07.96l-2.06 1.6 2 3.46 2.47-.86c.51.4 1.07.73 1.66.96L9.5 21h5l.36-2.9c.59-.23 1.15-.56 1.66-.96l2.47.86 2-3.46-2.06-1.6c.05-.31.07-.63.07-.96Z"
+                    stroke="currentColor" stroke-width="1.2" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- Кнопка питания -->
+    <div class="grid place-items-center my-8">
+        <button type="button" class="h-28 w-28 rounded-full grid place-items-center
+                                bg-neutral-800/70 border border-white/10 shadow-xl hover:bg-neutral-800 transition
+                                {{ '' if online else 'opacity-50 pointer-events-none' }}"
+                data-power aria-pressed="{{ 'true' if power else 'false' }}" {{ '' if online else 'disabled' }}>
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none"
+                class="{{ 'text-emerald-400' if power else 'text-neutral-400' }}">
+                <path d="M12 3v7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                <path d="M6.3 7.5a7.5 7.5 0 1 0 11.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- Управления -->
+    <div class="grid gap-4 md:grid-cols-2">
+        <div>
+            <div class="text-sm text-neutral-400">Режим</div>
+            <div class="mt-2 relative">
+                <select class="w-full px-3 py-2 rounded-xl bg-neutral-900 border border-white/10 
+                               {{ '' if online else 'opacity-50 pointer-events-none' }}"
+                        data-select="mode" {{ '' if online else 'disabled' }}>
+                    {% for value,label in mode_options %}
+                    <option value="{{ value }}" {{ 'selected' if value==mode_value else '' }}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <div>
+            <div class="text-sm text-neutral-400">Звук</div>
+            <div class="mt-2 relative">
+                <select class="w-full px-3 py-2 rounded-xl bg-neutral-900 border border-white/10 
+                               {{ '' if online else 'opacity-50 pointer-events-none' }}"
+                        data-select="sound" {{ '' if online else 'disabled' }}>
+                    {% for value,label in sound_options %}
+                    <option value="{{ value }}" {{ 'selected' if value==sound_value else '' }}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <label class="flex items-center gap-3 pt-2 md:col-span-2 
+                      {{ '' if online else 'opacity-50 pointer-events-none' }}">
+            <input type="checkbox" class="h-5 w-5 rounded bg-neutral-900 border-white/20"
+                data-toggle="backlight" {{ 'checked' if backlight else '' }} {{ '' if online else 'disabled' }}>
+            <span class="text-sm">Подсветка</span>
+        </label>
+    </div>
+
+    <!-- МОДАЛКА НАСТРОЕК (всегда доступна) -->
+    <div class="fixed inset-0 z-[60] hidden" data-settings-modal>
+        <div class="absolute inset-0 bg-black/60" data-close-settings></div>
+        <div class="relative mx-auto my-12 max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6">
+            <h3 class="text-lg font-semibold">Настройки устройства</h3>
+            <form class="mt-4 space-y-3" data-settings-form>
+                <label class="auth-label mt-0">Имя устройства
+                    <input type="text" name="title" required class="auth-input" value="{{ title }}">
+                </label>
+
+                <div class="flex gap-2 pt-2">
+                    <button type="submit" class="flex-1 auth-button">Сохранить</button>
+                    <button type="button"
+                        class="flex-1 px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-close-settings>
+                        Отмена
+                    </button>
+                </div>
+
+                <div class="pt-3">
+                    <button type="button"
+                        class="w-full px-4 py-2 rounded-xl bg-rose-500 text-neutral-900 font-semibold hover:brightness-110"
+                        data-delete-device>
+                        Удалить устройство
+                    </button>
+                </div>
+
+                <div class="text-sm mt-2" data-settings-msg></div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{# ================= С У Ш И Л Ь Н Ы Й Ш К А Ф ================= #}
+{% macro dryer_card(id, title, online=True, power=False,
+program_options=[], program_value=None,
+sound=False,
+temp_c=None,
+time_left=None) %}
+<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col" 
+     data-device-id="{{ id }}" data-device-kind="dryer">
+
+    <!-- Заголовок -->
+    <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"></div>
+            <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
+            <span class="text-xs text-neutral-400">{{ 'онлайн' if online else 'оффлайн' }}</span>
+        </div>
+        <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings aria-label="Настройки">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" stroke-width="1.6" />
+                <path
+                    d="M19 12a7 7 0 0 0-.07-.96l2.06-1.6-2-3.46-2.47.86a7.07 7.07 0 0 0-1.66-.96L14.5 3h-5l-.36 2.9a7.07 7.07 0 0 0-1.66.96l-2.47-.86-2 3.46 2.06 1.6A7 7 0 0 0 5 12c0 .33.02.65.07.96l-2.06 1.6 2 3.46 2.47-.86c.51.4 1.07.73 1.66.96L9.5 21h5l.36-2.9c.59-.23 1.15-.56 1.66-.96l2.47.86 2-3.46-2.06-1.6c.05-.31.07-.63.07-.96Z"
+                    stroke="currentColor" stroke-width="1.2" />
+            </svg>
+        </button>
+    </div>
+
+    <!-- Центральная зона -->
+    <div class="my-8 grid grid-cols-3 items-center">
+        <!-- Температура -->
+        <div class="flex items-center justify-start gap-2">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" class="text-neutral-400">
+                <path d="M10 14.5V5.5a2 2 0 1 1 4 0v9a4 4 0 1 1-4 0Z" stroke="currentColor" stroke-width="1.5" />
+                <path d="M12 6v8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
+            <div class="text-sm">
+                <div class="font-semibold leading-none {{ 'text-emerald-400' if power else 'text-neutral-500' }}" data-temp>
+                    {% if power and temp_c is not none %} {{ temp_c }}°C {% else %} — {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Кнопка питания -->
+        <div class="grid place-items-center">
+            <button type="button" class="h-28 w-28 rounded-full grid place-items-center
+                                bg-neutral-800/70 border border-white/10 shadow-xl hover:bg-neutral-800 transition
+                                {{ '' if online else 'opacity-50 pointer-events-none' }}"
+                    data-power aria-pressed="{{ 'true' if power else 'false' }}" {{ '' if online else 'disabled' }}>
+                <svg width="56" height="56" viewBox="0 0 24 24" fill="none"
+                    class="{{ 'text-emerald-400' if power else 'text-neutral-400' }}">
+                    <path d="M12 3v7" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                    <path d="M6.3 7.5a7.5 7.5 0 1 0 11.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- Время -->
+        <div class="flex items-center justify-end gap-2">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" class="text-neutral-400">
+                <circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.5" />
+                <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    stroke-linejoin="round" />
+            </svg>
+            <div class="text-sm text-right">
+                <div class="font-semibold leading-none {{ 'text-emerald-400' if power else 'text-neutral-500' }}" data-time>
+                    {% if power and time_left is not none %} {{ time_left }} {% else %} — {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Управления -->
+    <div class="grid gap-4 md:grid-cols-1">
+        <div>
+            <div class="text-sm text-neutral-400">Режим</div>
+            <select class="mt-2 w-full px-3 py-2 rounded-xl bg-neutral-900 border border-white/10
+                           {{ '' if online else 'opacity-50 pointer-events-none' }}"
+                data-select="program" {{ '' if online else 'disabled' }}>
+                {% for value,label in program_options %}
+                <option value="{{ value }}" {{ 'selected' if value==program_value else '' }}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <label class="flex items-center gap-3 pt-2 md:col-span-2 
+                      {{ '' if online else 'opacity-50 pointer-events-none' }}">
+            <input type="checkbox" class="h-5 w-5 rounded bg-neutral-900 border-white/20"
+                data-toggle="sound" {{ 'checked' if sound else '' }} {{ '' if online else 'disabled' }}>
+            <span class="text-sm">Звук</span>
+        </label>
+    </div>
+
+    <!-- Модалка -->
+    <div class="fixed inset-0 z-[60] hidden" data-settings-modal>
+        <div class="absolute inset-0 bg-black/60" data-close-settings></div>
+        <div class="relative mx-auto my-12 max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6">
+            <h3 class="text-lg font-semibold">Настройки устройства</h3>
+            <form class="mt-4 space-y-3" data-settings-form>
+                <label class="auth-label mt-0">Имя устройства
+                    <input type="text" name="title" required class="auth-input" value="{{ title }}">
+                </label>
+
+                <div class="flex gap-2 pt-2">
+                    <button type="submit" class="flex-1 auth-button">Сохранить</button>
+                    <button type="button"
+                        class="flex-1 px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-close-settings>
+                        Отмена
+                    </button>
+                </div>
+
+                <div class="pt-3">
+                    <button type="button"
+                        class="w-full px-4 py-2 rounded-xl bg-rose-500 text-neutral-900 font-semibold hover:brightness-110"
+                        data-delete-device>
+                        Удалить устройство
+                    </button>
+                </div>
+
+                <div class="text-sm mt-2" data-settings-msg></div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endmacro %}
