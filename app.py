@@ -13,6 +13,9 @@ DB_PATH = "sf.db"
 app = Flask(__name__)
 app.secret_key = APP_SECRET
 
+FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 5)]
+FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
+
 # ---------- БД ----------
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -36,6 +39,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             device_id TEXT NOT NULL UNIQUE,
             name TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'dryer',
             on_state INTEGER DEFAULT 0,
             program TEXT DEFAULT NULL,
             last_seen TEXT DEFAULT NULL,
@@ -43,6 +47,11 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """)
+
+        # миграция: если колонка kind отсутствует (старая БД) — добавляем
+        cols = {row["name"] for row in con.execute("PRAGMA table_info(devices)")}
+        if "kind" not in cols:
+            con.execute("ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'dryer'")
 init_db()
 
 # ---------- Текущий пользователь ----------
@@ -66,6 +75,45 @@ def login_required(fn):
             return redirect(url_for("index") + "#login")
         return fn(*args, **kwargs)
     return wrapper
+
+
+def fetch_user_devices(user_id: int):
+    with db() as con:
+        rows = con.execute("""
+            SELECT device_id, name, kind, on_state, program, last_seen, created_at
+            FROM devices WHERE user_id=? ORDER BY created_at DESC
+        """, (user_id,)).fetchall()
+
+    devices = []
+    for row in rows:
+        device_id = row["device_id"]
+        kind = (row["kind"] or "dryer").lower()
+        base = {
+            "id": device_id,
+            "kind": kind,
+            "title": row["name"] or ("Камин" if kind == "fireplace" else "Сушильный шкаф"),
+            "online": bool(ONLINE.get(device_id)),
+            "power": bool(row["on_state"]),
+        }
+
+        if kind == "fireplace":
+            base.update({
+                "mode_options": FIREPLACE_MODE_OPTIONS,
+                "mode_value": row["program"] or FIREPLACE_MODE_OPTIONS[0][0],
+                "sound_options": FIREPLACE_SOUND_OPTIONS,
+                "sound_value": FIREPLACE_SOUND_OPTIONS[0][0],
+                "backlight": False,
+            })
+        else:
+            base.update({
+                "program_value": row["program"] or "standard",
+                "sound": False,
+                "temp_c": None,
+                "time_left": None,
+            })
+
+        devices.append(base)
+    return devices
 
 # ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
 def _state_to_db(device_id: str, kind: str, payload):
@@ -97,12 +145,14 @@ register_state_handler(_state_to_db)
 # ---------- РОУТЫ ----------
 @app.get("/")
 def index():
-    return render_template("index.html", user=g.user, year=datetime.now().year)
+    devices = fetch_user_devices(g.user["id"]) if g.user else []
+    return render_template("index.html", user=g.user, devices=devices, year=datetime.now().year)
 
 @app.get("/devices")
 @login_required
 def devices():
-    return render_template("index.html", user=g.user, year=datetime.now().year)
+    devices = fetch_user_devices(g.user["id"]) if g.user else []
+    return render_template("index.html", user=g.user, devices=devices, year=datetime.now().year)
 
 # --- Аутентификация ---
 @app.post("/register")
@@ -203,7 +253,7 @@ def account_delete():
 def api_devices_list():
     with db() as con:
         rows = con.execute("""
-            SELECT device_id, name, on_state, program, last_seen, created_at
+            SELECT device_id, name, kind, on_state, program, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (g.user["id"],)).fetchall()
     devices = []
@@ -212,6 +262,7 @@ def api_devices_list():
         devices.append({
             "device_id": dev_id,
             "name": r["name"],
+            "kind": (r["kind"] or "dryer"),
             "online": bool(ONLINE.get(dev_id)),
             "on": bool(r["on_state"]),
             "program": r["program"],
@@ -240,22 +291,60 @@ def api_devices_pair():
         exists = con.execute("SELECT 1 FROM devices WHERE device_id=?", (device_id,)).fetchone()
         if not exists:
             con.execute("""
-                INSERT INTO devices (user_id, device_id, name, on_state, program, last_seen, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO devices (user_id, device_id, name, kind, on_state, program, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 g.user["id"],
                 device_id,
                 "Сушильный шкаф",
+                "dryer",
                 0,
-                None,
+                "standard",
                 None,
                 datetime.utcnow().isoformat()
             ))
         else:
-            con.execute("UPDATE devices SET user_id=? WHERE device_id=?",
-                        (g.user["id"], device_id))
+            con.execute("UPDATE devices SET user_id=?, kind=?, name=?, program=? WHERE device_id=?",
+                        (g.user["id"], "dryer", "Сушильный шкаф", "standard", device_id))
 
     return jsonify(ok=True, device_id=device_id, name="Сушильный шкаф")
+
+
+@app.post("/api/devices/manual")
+@login_required
+def api_devices_manual_add():
+    if not request.is_json:
+        return jsonify(ok=False, message="Тело должно быть JSON"), 400
+
+    data = request.get_json(silent=True) or {}
+    kind = (data.get("kind") or "").strip().lower()
+    serial = (data.get("serial") or "").strip().upper()
+
+    if kind not in {"fireplace", "dryer"}:
+        return jsonify(ok=False, message="Неизвестный тип устройства"), 400
+
+    if len(serial) != 6 or not serial.isalnum():
+        return jsonify(ok=False, message="Серийный номер должен состоять из 6 символов"), 400
+
+    device_name = "Камин" if kind == "fireplace" else "Сушильный шкаф"
+    program_default = FIREPLACE_MODE_OPTIONS[0][0] if kind == "fireplace" else "standard"
+
+    with db() as con:
+        row = con.execute("SELECT user_id FROM devices WHERE device_id=?", (serial,)).fetchone()
+        if row:
+            if row["user_id"] != g.user["id"]:
+                return jsonify(ok=False, message="Устройство уже привязано к другому аккаунту"), 409
+            con.execute("UPDATE devices SET kind=?, name=?, program=? WHERE device_id=?",
+                        (kind, device_name, program_default, serial))
+        else:
+            con.execute("""
+                INSERT INTO devices (user_id, device_id, name, kind, on_state, program, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                g.user["id"], serial, device_name, kind, 0, program_default, None, datetime.utcnow().isoformat()
+            ))
+
+    return jsonify(ok=True, device_id=serial, kind=kind, name=device_name)
 
 @app.post("/api/device/<device_id>/cmd")
 @login_required
