@@ -18,19 +18,17 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 
-<body class="flex flex-col min-h-screen min-h-screen bg-neutral-950 text-neutral-100">
+<body class="flex flex-col min-h-screen bg-neutral-950 text-neutral-100">
 
     <!-- NAVBAR -->
     <header class="fixed inset-x-0 top-0 z-50 bg-neutral-900/80 backdrop-blur border-b border-white/10">
         <div class="h-16 flex items-center justify-between">
-
             <!-- СЛЕВА: бургер (только когда есть user) + логотип -->
             <div class="pl-2 sm:pl-4 flex items-center gap-2 sm:gap-3">
                 {% if user %}
                 <button id="burger"
                     class="inline-flex md:hidden p-2 rounded-lg hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/30"
                     aria-label="Открыть меню" aria-expanded="false">
-                    <!-- иконка бургера -->
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
                         <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2"
                             stroke-linecap="round" />
@@ -45,13 +43,34 @@
                 {% if not user %}
                 <a href="#login" class="px-4 py-2 rounded-xl border border-white/15 hover:border-white/30">Войти</a>
                 <a href="#register" id="navRegister"
-                    class="px-4 py-2 rounded-xl bg-[--brand] hover:brightness-110 text-neutral-900 font-semibold">
+                    class="px-4 py-2 rounded-xl bg-[var(--brand)] hover:brightness-110 text-neutral-900 font-semibold">
                     Регистрация
                 </a>
                 {% else %}
-                <span class="text-sm text-neutral-300 hidden sm:inline">{{ user.email }}</span>
-                <a href="{{ url_for('logout') }}"
-                    class="px-3 py-2 rounded-xl border border-white/15 hover:border-white/30 text-sm">Выйти</a>
+                <!-- Профиль с выпадающим меню -->
+                <div class="relative">
+                    <button id="profileBtn"
+                        class="flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-white/10 text-sm">
+                        <span class="hidden sm:inline">{{ user.email }}</span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" class="opacity-80">
+                            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" />
+                        </svg>
+                    </button>
+
+                    <div id="profileMenu"
+                        class="absolute right-0 mt-2 w-56 rounded-xl border border-white/10 bg-neutral-900/95 backdrop-blur shadow-xl hidden">
+                        <div class="py-1 text-sm">
+                            <button id="openChangePwd"
+                                class="w-full text-left px-3 py-2 hover:bg-white/10 rounded-lg">Сменить пароль</button>
+                            <button id="openDeleteAcc"
+                                class="w-full text-left px-3 py-2 hover:bg-white/10 rounded-lg text-rose-300">Удалить
+                                аккаунт</button>
+                            <a href="{{ url_for('logout') }}"
+                                class="block px-3 py-2 hover:bg-white/10 rounded-lg">Выйти</a>
+                        </div>
+                    </div>
+                </div>
                 {% endif %}
             </div>
         </div>
@@ -59,119 +78,189 @@
 
     {% if not user %}
     <!-- Гостевой экран -->
-    <section class="relative pt-28 pb-24 overflow-hidden fire-gradient">
-        <!-- <div class="absolute inset-0 -z-10 bg-cover opacity-25"
-            style="background-image: url('{{ url_for('static', filename='kamin.jpg') }}'); background-position: 60% 70%;">
-        </div> -->
+    <section class="relative flex-1 grid place-items-center fire-gradient">
 
+        <!-- Фоновое фото (если нужно) -->
+        <!--
+  <div class="absolute inset-0 -z-10 bg-cover bg-center opacity-25"
+       style="background-image: url('{{ url_for('static', filename='kamin.jpg') }}'); background-position: 60% 70%;"></div>
+  -->
 
-        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 grid lg:grid-cols-2 gap-8 lg:gap-10 items-start">
-            <!-- <div>
-                <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold leading-tight">
-                    Встраиваемые <span class="text-[--brand]">паровые камины</span> для умного дома
-                </h1>
-                <p class="mt-6 text-neutral-300 text-lg max-w-xl">
-                    Уникальный предмет интерьера, созданный инженерами с немецкими корнями по собственной
-                    запатентованной технологии.
-                </p>
-            </div> -->
+        <div class="glass rounded-3xl border border-white/10 p-5 sm:p-6 md:p-8 shadow-2xl w-full max-w-md">
+            {% with msgs = get_flashed_messages() %}
+            {% if msgs %}
+            <div class="mb-4 text-sm text-emerald-300">{{ msgs[0] }}</div>
+            {% endif %}
+            {% endwith %}
 
-            <!-- Карточка с формами -->
-            <div class="glass rounded-3xl border border-white/10 p-5 sm:p-6 md:p-8 shadow-2xl">
-                {% with msgs = get_flashed_messages() %}
-                {% if msgs %}
-                <div class="mb-4 text-sm text-emerald-300">{{ msgs[0] }}</div>
-                {% endif %}
-                {% endwith %}
+            <!-- Форма входа -->
+            <div id="loginForm">
+                <form method="post" action="{{ url_for('login') }}" class="auth-card">
+                    <div class="text-lg font-semibold mb-2">Вход</div>
 
-                <!-- Форма входа -->
-                <div id="loginForm">
-                    <form method="post" action="{{ url_for('login') }}" class="auth-card">
-                        <div class="text-lg font-semibold mb-2">Вход</div>
+                    <label class="auth-label mt-0">Email
+                        <input name="email" type="email" required class="auth-input" autocomplete="username">
+                    </label>
 
-                        <label class="auth-label mt-0">Email
-                            <input name="email" type="email" required class="auth-input" autocomplete="username">
-                        </label>
+                    <label class="auth-label">Пароль
+                        <input name="password" type="password" required class="auth-input"
+                            autocomplete="current-password">
+                    </label>
 
-                        <label class="auth-label">Пароль
-                            <input name="password" type="password" required class="auth-input"
-                                autocomplete="current-password">
-                        </label>
+                    <button class="auth-button">Войти</button>
 
-                        <button class="auth-button">Войти</button>
+                    <p class="mt-3 text-sm text-neutral-400">
+                        Нет аккаунта?
+                        <a href="#" id="showRegister" class="underline">Зарегистрироваться</a>
+                    </p>
+                </form>
+            </div>
 
-                        <p class="mt-3 text-sm text-neutral-400">
-                            Нет аккаунта?
-                            <a href="#" id="showRegister" class="underline">Зарегистрироваться</a>
-                        </p>
-                    </form>
-                </div>
+            <!-- Форма регистрации -->
+            <div id="registerForm" class="hidden">
+                <form method="post" action="{{ url_for('register') }}" class="auth-card">
+                    <div class="text-lg font-semibold mb-2">Регистрация</div>
 
-                <!-- Форма регистрации -->
-                <div id="registerForm" class="hidden">
-                    <form method="post" action="{{ url_for('register') }}" class="auth-card">
-                        <div class="text-lg font-semibold mb-2">Регистрация</div>
+                    <label class="auth-label mt-0">Email
+                        <input name="email" type="email" required class="auth-input" autocomplete="email">
+                    </label>
 
-                        <label class="auth-label mt-0">Email
-                            <input name="email" type="email" required class="auth-input" autocomplete="email">
-                        </label>
+                    <label class="auth-label">Пароль
+                        <input name="password" type="password" minlength="6" required class="auth-input"
+                            autocomplete="new-password">
+                    </label>
 
-                        <label class="auth-label">Пароль
-                            <input name="password" type="password" minlength="6" required class="auth-input"
-                                autocomplete="new-password">
-                        </label>
+                    <label class="auth-label">Повтор пароля
+                        <input name="password2" type="password" minlength="6" required class="auth-input"
+                            autocomplete="new-password">
+                    </label>
 
-                        <label class="auth-label">Повтор пароля
-                            <input name="password2" type="password" minlength="6" required class="auth-input"
-                                autocomplete="new-password">
-                        </label>
+                    <button class="auth-button">Создать аккаунт</button>
 
-                        <button class="auth-button">Создать аккаунт</button>
-
-                        <p class="mt-3 text-sm text-neutral-400">
-                            Уже есть аккаунт?
-                            <a href="#" id="showLogin" class="underline">Войти</a>
-                        </p>
-                    </form>
-                </div>
+                    <p class="mt-3 text-sm text-neutral-400">
+                        Уже есть аккаунт?
+                        <a href="#" id="showLogin" class="underline">Войти</a>
+                    </p>
+                </form>
             </div>
         </div>
     </section>
 
+
     {% else %}
-    <!-- Кабинет -->
-    <div class="pt-16"></div>
+    <!-- ОБЁРТКА: хедер фиксированный, поэтому даём общий верхний отступ = 4rem -->
+    <div class="pt-16 flex">
 
-    <!-- МОБИЛЬНЫЙ overlay и drawer -->
-    <div id="drawerOverlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"></div>
-    <aside id="drawer" class="fixed left-0 top-16 bottom-0 w-72 bg-neutral-900 border-r border-white/10 z-50
-                -translate-x-full md:translate-x-0 md:static md:top-0 md:h-[calc(100vh-4rem)]
-                transition-transform duration-200 ease-out">
-        <div class="p-4 h-full flex flex-col">
-            <div class="font-bold">УМНЫЙ ДОМ</div>
-            <nav class="mt-6 text-sm space-y-1">
-                <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
-                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
-                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
-                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Документация</div>
-            </nav>
-            <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
-        </div>
-    </aside>
+        <!-- МОБИЛЬНЫЙ overlay -->
+        <div id="drawerOverlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"></div>
 
-    <main class="md:pl-72">
-        <section class="p-4 sm:p-6">
-            <h2 class="text-2xl font-bold">Устройства</h2>
-            <p class="mt-2 text-neutral-400">Нет подключённых устройств.</p>
-            <button
-                class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/90 text-neutral-900 font-semibold">
-                Подключить новое устройство
-            </button>
-        </section>
-    </main>
+        <!-- Сайдбар -->
+        <aside class="hidden md:block w-72 shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)]
+             bg-neutral-900 border-r border-white/10">
+            <div class="p-4 h-full flex flex-col">
+                <div class="font-bold">УМНЫЙ ДОМ</div>
+                <nav class="mt-6 text-sm space-y-1">
+                    <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
+                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
+                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
+                </nav>
+                <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
+            </div>
+        </aside>
+
+        <!-- Мобильный выезжающий сайдбар -->
+        <aside id="drawer" class="fixed left-0 top-16 bottom-0 w-72 bg-neutral-900 border-r border-white/10 z-50
+             -translate-x-full md:hidden transition-transform duration-200 ease-out">
+            <div class="p-4 h-full flex flex-col">
+                <div class="font-bold">УМНЫЙ ДОМ</div>
+                <nav class="mt-6 text-sm space-y-1">
+                    <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
+                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
+                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
+                </nav>
+                <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
+            </div>
+        </aside>
+
+        <!-- ОСНОВНОЙ КОНТЕНТ -->
+        <main class="flex-1">
+            <section class="p-4 sm:p-6 lg:p-8">
+                <h2 class="text-2xl font-bold">Устройства</h2>
+                <p class="mt-2 text-neutral-400">Нет подключённых устройств.</p>
+                <button
+                    class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/90 text-neutral-900 font-semibold">
+                    Подключить новое устройство
+                </button>
+            </section>
+        </main>
+    </div>
     {% endif %}
 
-    <footer class="text-center text-neutral-500 text-sm py-6 mt-auto">© {{ year }} Schönes Feuer</footer>
+
+
+    <footer
+        class="fixed inset-x-0 bottom-0 text-center text-neutral-500 text-sm py-4 bg-neutral-950 border-t border-white/10">
+        © {{ year }} Schönes Feuer</footer>
+
+    <!-- Модалка: смена пароля -->
+    <div id="modalChangePwd" class="fixed inset-0 z-[60] hidden">
+        <div class="absolute inset-0 bg-black/60"></div>
+        <div class="relative mx-auto my-12 max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6">
+            <h3 class="text-lg font-semibold">Сменить пароль</h3>
+            <form id="changePwdForm" class="mt-4 space-y-3">
+                <label class="auth-label mt-0">Текущий пароль
+                    <input name="old_password" type="password" required class="auth-input"
+                        autocomplete="current-password">
+                </label>
+                <label class="auth-label">Новый пароль
+                    <input name="new_password" type="password" minlength="6" required class="auth-input"
+                        autocomplete="new-password">
+                </label>
+                <label class="auth-label">Повтор нового пароля
+                    <input name="new_password2" type="password" minlength="6" required class="auth-input"
+                        autocomplete="new-password">
+                </label>
+                <div id="changePwdMsg" class="text-sm mt-1"></div>
+                <div class="flex gap-2 pt-2">
+                    <button type="submit" class="flex-1 auth-button">Обновить</button>
+                    <button type="button"
+                        class="flex-1 px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-close-change>
+                        Отмена
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Модалка: удаление аккаунта -->
+    <div id="modalDeleteAcc" class="fixed inset-0 z-[60] hidden">
+        <div class="absolute inset-0 bg-black/60"></div>
+        <div class="relative mx-auto my-12 max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6">
+            <h3 class="text-lg font-semibold text-rose-300">Удалить аккаунт</h3>
+            <p class="mt-2 text-sm text-neutral-300">
+                Это действие <b>необратимо</b>. Все ваши устройства и данные будут отвязаны.
+            </p>
+            <form id="deleteAccForm" class="mt-4 space-y-3">
+                <label class="auth-label mt-0">Подтвердите пароль
+                    <input name="password" type="password" required class="auth-input" autocomplete="current-password">
+                </label>
+                <label class="auth-label">Введите <code>УДАЛИТЬ</code> для подтверждения
+                    <input name="confirm" type="text" placeholder="УДАЛИТЬ" required class="auth-input">
+                </label>
+                <div id="deleteAccMsg" class="text-sm mt-1"></div>
+                <div class="flex gap-2 pt-2">
+                    <button type="submit"
+                        class="flex-1 px-4 py-2 rounded-xl bg-rose-500 text-neutral-900 font-semibold hover:brightness-110">Удалить</button>
+                    <button type="button"
+                        class="flex-1 px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-close-delete>
+                        Отмена
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <script>
         (function () {
@@ -240,10 +329,121 @@
                 if (e.key === "Escape") closeDrawer();
             });
 
-            // Закрывать drawer при переходе на десктоп
             const mql = window.matchMedia("(min-width: 768px)");
             if (mql.matches) closeDrawer();
             mql.addEventListener("change", (e) => { if (e.matches) closeDrawer(); });
+
+            // ===== Профиль: выпадающее меню =====
+            const profileBtn = document.getElementById("profileBtn");
+            const profileMenu = document.getElementById("profileMenu");
+            if (profileBtn && profileMenu) {
+                function toggleProfileMenu() {
+                    profileMenu.classList.toggle("hidden");
+                }
+                profileBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    toggleProfileMenu();
+                });
+                document.addEventListener("click", (e) => {
+                    if (!profileMenu.contains(e.target) && !profileBtn.contains(e.target)) {
+                        profileMenu.classList.add("hidden");
+                    }
+                });
+            }
+
+            // ===== Модалки =====
+            const modalChangePwd = document.getElementById("modalChangePwd");
+            const modalDeleteAcc = document.getElementById("modalDeleteAcc");
+            const openChangePwd = document.getElementById("openChangePwd");
+            const openDeleteAcc = document.getElementById("openDeleteAcc");
+
+            function openModal(el) { if (!el) return; el.classList.remove("hidden"); document.body.classList.add("no-scroll"); }
+            function closeModal(el) { if (!el) return; el.classList.add("hidden"); document.body.classList.remove("no-scroll"); }
+
+            if (openChangePwd) openChangePwd.addEventListener("click", () => { profileMenu?.classList.add("hidden"); openModal(modalChangePwd); });
+            if (openDeleteAcc) openDeleteAcc.addEventListener("click", () => { profileMenu?.classList.add("hidden"); openModal(modalDeleteAcc); });
+
+            modalChangePwd?.addEventListener("click", (e) => { if (e.target === modalChangePwd) closeModal(modalChangePwd); });
+            modalDeleteAcc?.addEventListener("click", (e) => { if (e.target === modalDeleteAcc) closeModal(modalDeleteAcc); });
+            document.querySelector("[data-close-change]")?.addEventListener("click", () => closeModal(modalChangePwd));
+            document.querySelector("[data-close-delete]")?.addEventListener("click", () => closeModal(modalDeleteAcc));
+
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") {
+                    if (modalChangePwd && !modalChangePwd.classList.contains("hidden")) closeModal(modalChangePwd);
+                    if (modalDeleteAcc && !modalDeleteAcc.classList.contains("hidden")) closeModal(modalDeleteAcc);
+                }
+            });
+
+            // ===== Отправка: смена пароля =====
+            const changePwdForm = document.getElementById("changePwdForm");
+            const changePwdMsg = document.getElementById("changePwdMsg");
+            if (changePwdForm) {
+                changePwdForm.addEventListener("submit", async (e) => {
+                    e.preventDefault();
+                    changePwdMsg.textContent = "";
+                    const fd = new FormData(changePwdForm);
+                    const old_password = fd.get("old_password");
+                    const new_password = fd.get("new_password");
+                    const new_password2 = fd.get("new_password2");
+                    if (new_password !== new_password2) {
+                        changePwdMsg.textContent = "Пароли не совпадают.";
+                        changePwdMsg.className = "text-sm mt-1 text-rose-300";
+                        return;
+                    }
+                    try {
+                        const r = await fetch("{{ url_for('account_change_password') }}", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ old_password, new_password })
+                        });
+                        const data = await r.json();
+                        changePwdMsg.textContent = data.message || (data.ok ? "Готово" : "Ошибка");
+                        changePwdMsg.className = "text-sm mt-1 " + (data.ok ? "text-emerald-300" : "text-rose-300");
+                        if (data.ok) {
+                            setTimeout(() => { closeModal(modalChangePwd); changePwdForm.reset(); }, 800);
+                        }
+                    } catch (err) {
+                        changePwdMsg.textContent = "Сеть/сервер недоступен";
+                        changePwdMsg.className = "text-sm mt-1 text-rose-300";
+                    }
+                });
+            }
+
+            // ===== Отправка: удаление аккаунта =====
+            const deleteAccForm = document.getElementById("deleteAccForm");
+            const deleteAccMsg = document.getElementById("deleteAccMsg");
+            if (deleteAccForm) {
+                deleteAccForm.addEventListener("submit", async (e) => {
+                    e.preventDefault();
+                    deleteAccMsg.textContent = "";
+                    const fd = new FormData(deleteAccForm);
+                    const password = fd.get("password");
+                    const confirm = fd.get("confirm");
+                    if (confirm !== "УДАЛИТЬ") {
+                        deleteAccMsg.textContent = "Введите слово УДАЛИТЬ для подтверждения.";
+                        deleteAccMsg.className = "text-sm mt-1 text-rose-300";
+                        return;
+                    }
+                    try {
+                        const r = await fetch("{{ url_for('account_delete') }}", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ password })
+                        });
+                        const data = await r.json();
+                        if (data.ok) {
+                            window.location.href = "{{ url_for('logout') }}";
+                        } else {
+                            deleteAccMsg.textContent = data.message || "Ошибка удаления.";
+                            deleteAccMsg.className = "text-sm mt-1 text-rose-300";
+                        }
+                    } catch (err) {
+                        deleteAccMsg.textContent = "Сеть/сервер недоступен";
+                        deleteAccMsg.className = "text-sm mt-1 text-rose-300";
+                    }
+                });
+            }
         })();
     </script>
 </body>

@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, session, render_template, flash, g
+from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify
 import sqlite3, os
 from datetime import datetime
 from functools import wraps
@@ -46,23 +46,21 @@ def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not g.user:
-            # нет логина — отправляем на главную и открываем форму входа
             return redirect(url_for("index") + "#login")
         return fn(*args, **kwargs)
     return wrapper
 
-# ---------- РОУТЫ ----------
+# ---------- РОУТЫ СТРАНИЦ ----------
 @app.get("/")
 def index():
-    # Ваш index.html уже умеет показывать «гостевой экран» или «кабинет» по наличию user
     return render_template("index.html", user=g.user, year=datetime.now().year)
 
 @app.get("/devices")
 @login_required
 def devices():
-    # Можно отрисовывать тот же шаблон: в нём есть ветка {% else %} с «Кабинет»
     return render_template("index.html", user=g.user, year=datetime.now().year)
 
+# ---------- Аутентификация ----------
 @app.post("/register")
 def register():
     email = (request.form.get("email") or "").strip().lower()
@@ -84,7 +82,6 @@ def register():
             flash("Такой email уже зарегистрирован.")
             return redirect(url_for("index") + "#register")
 
-    # сразу логиним и ведём на страницу устройств
     session["uid"] = uid
     return redirect(url_for("devices"), code=303)
 
@@ -98,7 +95,6 @@ def login():
             flash("Неверный email или пароль.")
             return redirect(url_for("index") + "#login")
         session["uid"] = row["id"]
-    # после логина — на устройства
     return redirect(url_for("devices"), code=303)
 
 @app.get("/logout")
@@ -106,5 +102,59 @@ def logout():
     session.clear()
     return redirect(url_for("index"))
 
+# ---------- Аккаунт: смена пароля / удаление ----------
+@app.post("/account/password")
+def account_change_password():
+    if not g.user:
+        return jsonify(ok=False, message="Не авторизован"), 401
+    if not request.is_json:
+        return jsonify(ok=False, message="Неверный формат"), 400
+
+    data = request.get_json(silent=True) or {}
+    old_password = (data.get("old_password") or "").strip()
+    new_password = (data.get("new_password") or "").strip()
+
+    if len(new_password) < 6:
+        return jsonify(ok=False, message="Минимум 6 символов"), 400
+
+    with db() as con:
+        row = con.execute("SELECT password_hash FROM users WHERE id=?", (session["uid"],)).fetchone()
+        if not row:
+            return jsonify(ok=False, message="Пользователь не найден"), 404
+        if not check_password_hash(row["password_hash"], old_password):
+            return jsonify(ok=False, message="Текущий пароль неверен"), 400
+
+        con.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (generate_password_hash(new_password), session["uid"])
+        )
+
+    return jsonify(ok=True, message="Пароль обновлён")
+
+@app.post("/account/delete")
+def account_delete():
+    if not g.user:
+        return jsonify(ok=False, message="Не авторизован"), 401
+    if not request.is_json:
+        return jsonify(ok=False, message="Неверный формат"), 400
+
+    data = request.get_json(silent=True) or {}
+    password = (data.get("password") or "").strip()
+
+    with db() as con:
+        row = con.execute("SELECT password_hash FROM users WHERE id=?", (session["uid"],)).fetchone()
+        if not row:
+            return jsonify(ok=False, message="Пользователь не найден"), 404
+        if not check_password_hash(row["password_hash"], password):
+            return jsonify(ok=False, message="Пароль неверен"), 400
+
+        # тут можно удалить связанные сущности (устройства и т.п.), если появятся таблицы
+        con.execute("DELETE FROM users WHERE id=?", (session["uid"],))
+
+    session.clear()
+    return jsonify(ok=True, message="Аккаунт удалён")
+
+# ---------- Запуск ----------
 if __name__ == "__main__":
+    # host/port при необходимости можно вынести в ENV
     app.run(debug=True)

@@ -5,7 +5,7 @@ body{
   font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
 }
 
-/* Чтобы отключать прокрутку, когда открыт drawer */
+/* Чтобы отключать прокрутку, когда открыт drawer или модалка */
 .no-scroll{ overflow:hidden; }
 
 /* Эффекты */
@@ -38,7 +38,7 @@ body{
   display:block;
   width:100%;
   margin-top: 4px;
-  padding: 10px 12px; /* чуть больше паддинга на мобилках */
+  padding: 10px 12px;
   background-color: rgb(38,38,38);
   border: 1px solid rgba(255,255,255,.10);
   border-radius: 12px;
@@ -62,4 +62,9 @@ body{
 /* Небольшие твики для маленьких экранов */
 @media (max-width: 639px){
   .auth-card{ padding: 12px; }
+}
+
+/* (опционально) компактнее паддинги внутри модалок на очень узких экранах */
+@media (max-width: 420px){
+  #modalChangePwd .p-6, #modalDeleteAcc .p-6 { padding: 16px; }
 }
