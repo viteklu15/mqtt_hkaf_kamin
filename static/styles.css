@@ -1,0 +1,65 @@
+:root{ --brand:#ff6b2c }
+
+/* База */
+body{
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+/* Чтобы отключать прокрутку, когда открыт drawer */
+.no-scroll{ overflow:hidden; }
+
+/* Эффекты */
+.glass{
+  backdrop-filter: blur(10px);
+  background: rgba(255,255,255,.06);
+}
+.fire-gradient{
+  background:
+    radial-gradient(1200px 600px at 40% 0%, rgba(255,110,48,.55), rgba(0,0,0,0) 60%),
+    radial-gradient(1200px 600px at 75% -10%, rgba(255,180,80,.45), rgba(0,0,0,0) 60%);
+}
+
+/* --- Универсальные классы формы --- */
+.auth-card{
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.auth-label{
+  display:block;
+  font-size: 0.875rem;
+  color: rgb(212,212,212);
+  margin-top: 12px;
+}
+.auth-label.mt-0{ margin-top: 0; }
+
+.auth-input{
+  display:block;
+  width:100%;
+  margin-top: 4px;
+  padding: 10px 12px; /* чуть больше паддинга на мобилках */
+  background-color: rgb(38,38,38);
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 12px;
+  color: rgb(245,245,245);
+}
+.auth-input::placeholder{ color: rgb(163,163,163); }
+
+.auth-button{
+  margin-top: 16px;
+  width:100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--brand);
+  color: #111827;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter .15s ease;
+}
+.auth-button:hover{ filter: brightness(1.1); }
+
+/* Небольшие твики для маленьких экранов */
+@media (max-width: 639px){
+  .auth-card{ padding: 12px; }
+}

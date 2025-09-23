@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ru">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Сушильный шкаф — Умный дом</title>
+
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Шрифты -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- Наш CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+
+<body class="flex flex-col min-h-screen min-h-screen bg-neutral-950 text-neutral-100">
+
+    <!-- NAVBAR -->
+    <header class="fixed inset-x-0 top-0 z-50 bg-neutral-900/80 backdrop-blur border-b border-white/10">
+        <div class="h-16 flex items-center justify-between">
+
+            <!-- СЛЕВА: бургер (только когда есть user) + логотип -->
+            <div class="pl-2 sm:pl-4 flex items-center gap-2 sm:gap-3">
+                {% if user %}
+                <button id="burger"
+                    class="inline-flex md:hidden p-2 rounded-lg hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/30"
+                    aria-label="Открыть меню" aria-expanded="false">
+                    <!-- иконка бургера -->
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2"
+                            stroke-linecap="round" />
+                    </svg>
+                </button>
+                {% endif %}
+                <img src="{{ url_for('static', filename='icon.svg') }}" alt="Логотип" class="h-8 w-auto">
+            </div>
+
+            <!-- СПРАВА -->
+            <div class="pr-4 flex items-center gap-3">
+                {% if not user %}
+                <a href="#login" class="px-4 py-2 rounded-xl border border-white/15 hover:border-white/30">Войти</a>
+                <a href="#register" id="navRegister"
+                    class="px-4 py-2 rounded-xl bg-[--brand] hover:brightness-110 text-neutral-900 font-semibold">
+                    Регистрация
+                </a>
+                {% else %}
+                <span class="text-sm text-neutral-300 hidden sm:inline">{{ user.email }}</span>
+                <a href="{{ url_for('logout') }}"
+                    class="px-3 py-2 rounded-xl border border-white/15 hover:border-white/30 text-sm">Выйти</a>
+                {% endif %}
+            </div>
+        </div>
+    </header>
+
+    {% if not user %}
+    <!-- Гостевой экран -->
+    <section class="relative pt-28 pb-24 overflow-hidden fire-gradient">
+        <!-- <div class="absolute inset-0 -z-10 bg-cover opacity-25"
+            style="background-image: url('{{ url_for('static', filename='kamin.jpg') }}'); background-position: 60% 70%;">
+        </div> -->
+
+
+        <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 grid lg:grid-cols-2 gap-8 lg:gap-10 items-start">
+            <!-- <div>
+                <h1 class="text-4xl sm:text-5xl lg:text-6xl font-extrabold leading-tight">
+                    Встраиваемые <span class="text-[--brand]">паровые камины</span> для умного дома
+                </h1>
+                <p class="mt-6 text-neutral-300 text-lg max-w-xl">
+                    Уникальный предмет интерьера, созданный инженерами с немецкими корнями по собственной
+                    запатентованной технологии.
+                </p>
+            </div> -->
+
+            <!-- Карточка с формами -->
+            <div class="glass rounded-3xl border border-white/10 p-5 sm:p-6 md:p-8 shadow-2xl">
+                {% with msgs = get_flashed_messages() %}
+                {% if msgs %}
+                <div class="mb-4 text-sm text-emerald-300">{{ msgs[0] }}</div>
+                {% endif %}
+                {% endwith %}
+
+                <!-- Форма входа -->
+                <div id="loginForm">
+                    <form method="post" action="{{ url_for('login') }}" class="auth-card">
+                        <div class="text-lg font-semibold mb-2">Вход</div>
+
+                        <label class="auth-label mt-0">Email
+                            <input name="email" type="email" required class="auth-input" autocomplete="username">
+                        </label>
+
+                        <label class="auth-label">Пароль
+                            <input name="password" type="password" required class="auth-input"
+                                autocomplete="current-password">
+                        </label>
+
+                        <button class="auth-button">Войти</button>
+
+                        <p class="mt-3 text-sm text-neutral-400">
+                            Нет аккаунта?
+                            <a href="#" id="showRegister" class="underline">Зарегистрироваться</a>
+                        </p>
+                    </form>
+                </div>
+
+                <!-- Форма регистрации -->
+                <div id="registerForm" class="hidden">
+                    <form method="post" action="{{ url_for('register') }}" class="auth-card">
+                        <div class="text-lg font-semibold mb-2">Регистрация</div>
+
+                        <label class="auth-label mt-0">Email
+                            <input name="email" type="email" required class="auth-input" autocomplete="email">
+                        </label>
+
+                        <label class="auth-label">Пароль
+                            <input name="password" type="password" minlength="6" required class="auth-input"
+                                autocomplete="new-password">
+                        </label>
+
+                        <label class="auth-label">Повтор пароля
+                            <input name="password2" type="password" minlength="6" required class="auth-input"
+                                autocomplete="new-password">
+                        </label>
+
+                        <button class="auth-button">Создать аккаунт</button>
+
+                        <p class="mt-3 text-sm text-neutral-400">
+                            Уже есть аккаунт?
+                            <a href="#" id="showLogin" class="underline">Войти</a>
+                        </p>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    {% else %}
+    <!-- Кабинет -->
+    <div class="pt-16"></div>
+
+    <!-- МОБИЛЬНЫЙ overlay и drawer -->
+    <div id="drawerOverlay" class="fixed inset-0 bg-black/50 z-40 hidden md:hidden"></div>
+    <aside id="drawer" class="fixed left-0 top-16 bottom-0 w-72 bg-neutral-900 border-r border-white/10 z-50
+                -translate-x-full md:translate-x-0 md:static md:top-0 md:h-[calc(100vh-4rem)]
+                transition-transform duration-200 ease-out">
+        <div class="p-4 h-full flex flex-col">
+            <div class="font-bold">УМНЫЙ ДОМ</div>
+            <nav class="mt-6 text-sm space-y-1">
+                <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
+                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
+                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
+                <div class="px-3 py-2 rounded-lg hover:bg-white/5">Документация</div>
+            </nav>
+            <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
+        </div>
+    </aside>
+
+    <main class="md:pl-72">
+        <section class="p-4 sm:p-6">
+            <h2 class="text-2xl font-bold">Устройства</h2>
+            <p class="mt-2 text-neutral-400">Нет подключённых устройств.</p>
+            <button
+                class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/90 text-neutral-900 font-semibold">
+                Подключить новое устройство
+            </button>
+        </section>
+    </main>
+    {% endif %}
+
+    <footer class="text-center text-neutral-500 text-sm py-6 mt-auto">© {{ year }} Schönes Feuer</footer>
+
+    <script>
+        (function () {
+            // Переключение логин/регистрация
+            const loginForm = document.getElementById("loginForm");
+            const registerForm = document.getElementById("registerForm");
+            const showRegister = document.getElementById("showRegister");
+            const showLogin = document.getElementById("showLogin");
+            const navRegister = document.getElementById("navRegister");
+
+            function openLogin(scroll = false) {
+                if (!loginForm || !registerForm) return;
+                registerForm.classList.add("hidden");
+                loginForm.classList.remove("hidden");
+                if (scroll) loginForm.scrollIntoView({ behavior: "smooth", block: "start" });
+                if (location.hash !== "#login") history.replaceState(null, "", "#login");
+            }
+
+            function openRegister(scroll = false) {
+                if (!loginForm || !registerForm) return;
+                loginForm.classList.add("hidden");
+                registerForm.classList.remove("hidden");
+                if (scroll) registerForm.scrollIntoView({ behavior: "smooth", block: "start" });
+                if (location.hash !== "#register") history.replaceState(null, "", "#register");
+            }
+
+            if (showRegister) showRegister.addEventListener("click", e => { e.preventDefault(); openRegister(true); });
+            if (showLogin) showLogin.addEventListener("click", e => { e.preventDefault(); openLogin(true); });
+            if (navRegister) navRegister.addEventListener("click", e => { e.preventDefault(); openRegister(true); });
+
+            function handleHash() {
+                if (!loginForm || !registerForm) return;
+                const h = (location.hash || "").toLowerCase();
+                if (h === "#register") openRegister();
+                else openLogin();
+            }
+            window.addEventListener("hashchange", handleHash);
+            handleHash();
+
+            // Мобильный drawer (только когда user залогинен)
+            const burger = document.getElementById("burger");
+            const drawer = document.getElementById("drawer");
+            const overlay = document.getElementById("drawerOverlay");
+
+            function openDrawer() {
+                if (!drawer || !overlay) return;
+                drawer.classList.remove("-translate-x-full");
+                overlay.classList.remove("hidden");
+                document.body.classList.add("no-scroll");
+                if (burger) burger.setAttribute("aria-expanded", "true");
+            }
+            function closeDrawer() {
+                if (!drawer || !overlay) return;
+                drawer.classList.add("-translate-x-full");
+                overlay.classList.add("hidden");
+                document.body.classList.remove("no-scroll");
+                if (burger) burger.setAttribute("aria-expanded", "false");
+            }
+
+            if (burger) burger.addEventListener("click", () => {
+                const isOpen = !drawer.classList.contains("-translate-x-full");
+                isOpen ? closeDrawer() : openDrawer();
+            });
+            if (overlay) overlay.addEventListener("click", closeDrawer);
+            document.addEventListener("keydown", (e) => {
+                if (e.key === "Escape") closeDrawer();
+            });
+
+            // Закрывать drawer при переходе на десктоп
+            const mql = window.matchMedia("(min-width: 768px)");
+            if (mql.matches) closeDrawer();
+            mql.addEventListener("change", (e) => { if (e.matches) closeDrawer(); });
+        })();
+    </script>
+</body>
+
+</html>
