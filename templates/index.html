@@ -288,6 +288,7 @@
                         class="auth-input tracking-[0.3em] uppercase" required inputmode="text"
                         pattern="[A-Za-z0-9]{6}">
                 </label>
+                <div class="text-sm mt-2 hidden" data-serial-status></div>
                 <div class="text-sm mt-2 text-rose-300 hidden" data-add-error></div>
                 <div class="flex gap-3 pt-4">
                     <button type="button"
@@ -552,14 +553,32 @@
                 const serialInput = addDeviceForm?.querySelector('input[name="serial"]');
                 const kindInput = addDeviceForm?.querySelector('input[name="kind"]');
                 const nameSpan = modalAddDevice.querySelector('[data-selected-name]');
+                const statusEl = modalAddDevice.querySelector('[data-serial-status]');
                 const errorEl = modalAddDevice.querySelector('[data-add-error]');
                 const submitBtn = modalAddDevice.querySelector('[data-add-submit]');
                 const backBtn = modalAddDevice.querySelector('[data-add-back]');
                 const closeEls = modalAddDevice.querySelectorAll('[data-close-add]');
                 const kindButtons = modalAddDevice.querySelectorAll('[data-kind-btn]');
                 const addUrl = "{{ url_for('api_devices_manual_add') }}";
+                const checkSerialUrl = "{{ url_for('api_devices_check_serial') }}";
                 const deviceNames = { fireplace: "камин", dryer: "сушильный шкаф" };
                 let currentKind = null;
+                let serialCheckTimer = null;
+                let serialCheckToken = 0;
+                let lastSerialCheck = null;
+
+                function setSerialStatus(text, colorClass = "text-neutral-300") {
+                    if (!statusEl) return;
+                    statusEl.textContent = text;
+                    statusEl.className = `text-sm mt-2 ${colorClass}`;
+                    statusEl.classList.remove("hidden");
+                }
+
+                function clearSerialStatus() {
+                    if (!statusEl) return;
+                    statusEl.textContent = "";
+                    statusEl.className = "text-sm mt-2 hidden";
+                }
 
                 function showStep(step) {
                     if (!chooseStep || !serialStep) return;
@@ -588,6 +607,12 @@
                 function resetModal() {
                     currentKind = null;
                     addDeviceForm?.reset();
+                    if (serialCheckTimer) {
+                        clearTimeout(serialCheckTimer);
+                        serialCheckTimer = null;
+                    }
+                    serialCheckToken += 1;
+                    lastSerialCheck = null;
                     if (kindInput) kindInput.value = "";
                     if (serialInput) serialInput.value = "";
                     if (nameSpan) nameSpan.textContent = "";
@@ -596,6 +621,7 @@
                         submitBtn.textContent = "Подключить";
                     }
                     hideError();
+                    clearSerialStatus();
                     showStep("choose");
                 }
 
@@ -630,6 +656,9 @@
                         if (kindInput) kindInput.value = kind;
                         if (nameSpan) nameSpan.textContent = deviceNames[kind] || "";
                         hideError();
+                        clearSerialStatus();
+                        serialCheckToken += 1;
+                        lastSerialCheck = null;
                         showStep("serial");
                     });
                 });
@@ -639,6 +668,89 @@
                     if (kindInput) kindInput.value = "";
                     showStep("choose");
                     hideError();
+                    if (serialCheckTimer) {
+                        clearTimeout(serialCheckTimer);
+                        serialCheckTimer = null;
+                    }
+                    serialCheckToken += 1;
+                    lastSerialCheck = null;
+                    clearSerialStatus();
+                });
+
+                async function requestSerialStatus(serial, showPending = true) {
+                    if (!/^[A-Z0-9]{6}$/.test(serial)) {
+                        return null;
+                    }
+                    const token = ++serialCheckToken;
+                    if (showPending) {
+                        setSerialStatus("Проверяем код...", "text-neutral-300");
+                    }
+                    try {
+                        const r = await fetch(checkSerialUrl, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ serial })
+                        });
+                        const data = await r.json().catch(() => ({}));
+                        if (token !== serialCheckToken) {
+                            return lastSerialCheck;
+                        }
+                        if (!r.ok || data.ok === false) {
+                            setSerialStatus(data.message || "Не удалось проверить код.", "text-rose-300");
+                            lastSerialCheck = null;
+                            return null;
+                        }
+
+                        const status = data.status || "not_found";
+                        const online = !!data.online;
+                        let color = "text-neutral-300";
+                        let text = data.message || "";
+                        if (status === "available") {
+                            color = online ? "text-emerald-300" : "text-amber-300";
+                            if (!text) {
+                                text = online ? "Устройство онлайн и свободно." : "Устройство найдено, но сейчас не в сети.";
+                            }
+                        } else if (status === "occupied") {
+                            color = "text-rose-300";
+                            if (!text) text = "Устройство уже привязано к другому аккаунту.";
+                        } else if (status === "owned_by_you") {
+                            color = "text-amber-300";
+                            if (!text) text = "Устройство уже привязано к вашему аккаунту.";
+                        } else {
+                            color = "text-rose-300";
+                            if (!text) text = "Устройство не в сети или уже привязано.";
+                        }
+
+                        setSerialStatus(text, color);
+                        lastSerialCheck = { serial, status, online, device_id: data.device_id };
+                        return lastSerialCheck;
+                    } catch (err) {
+                        if (token === serialCheckToken) {
+                            setSerialStatus("Не удалось проверить код. Проверьте подключение к сети.", "text-rose-300");
+                            lastSerialCheck = null;
+                        }
+                        return null;
+                    }
+                }
+
+                serialInput?.addEventListener("input", () => {
+                    if (!serialInput) return;
+                    serialInput.value = (serialInput.value || "").toUpperCase();
+                    hideError();
+                    const value = (serialInput.value || "").trim();
+                    if (serialCheckTimer) {
+                        clearTimeout(serialCheckTimer);
+                        serialCheckTimer = null;
+                    }
+                    if (/^[A-Z0-9]{6}$/.test(value)) {
+                        serialCheckTimer = setTimeout(() => {
+                            requestSerialStatus(value, true);
+                        }, 300);
+                    } else {
+                        serialCheckToken += 1;
+                        lastSerialCheck = null;
+                        clearSerialStatus();
+                    }
                 });
 
                 addDeviceForm?.addEventListener("submit", async (e) => {
@@ -656,6 +768,29 @@
                     }
 
                     hideError();
+
+                    const check = await requestSerialStatus(serial, true);
+                    if (!check) {
+                        showError("Не удалось проверить устройство. Попробуйте ещё раз.");
+                        return;
+                    }
+                    if (check.status === "not_found") {
+                        showError("Устройство не найдено. Проверьте питание и подключение к сети.");
+                        return;
+                    }
+                    if (check.status === "occupied") {
+                        showError("Устройство уже привязано к другому аккаунту.");
+                        return;
+                    }
+                    if (check.status === "owned_by_you") {
+                        showError("Устройство уже привязано к вашему аккаунту.");
+                        return;
+                    }
+                    if (!check.online) {
+                        showError("Устройство найдено, но сейчас не в сети.");
+                        return;
+                    }
+
                     submitBtn.disabled = true;
                     submitBtn.textContent = "Подключаем...";
 

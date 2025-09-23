@@ -115,6 +115,58 @@ def fetch_user_devices(user_id: int):
         devices.append(base)
     return devices
 
+# ---------- Проверка серийного номера через MQTT индекс ----------
+def lookup_claim_status(serial: str, user_id: int, con=None):
+    """Возвращает информацию о статусе устройства по серийному номеру."""
+    code = (serial or "").strip().upper()
+
+    device_id = CODE_INDEX.get(code)
+    online = False
+    owner_id = None
+
+    if device_id:
+        online = bool(ONLINE.get(device_id))
+
+        close_conn = False
+        if con is None:
+            con = db()
+            close_conn = True
+        try:
+            row = con.execute(
+                "SELECT user_id FROM devices WHERE device_id=?",
+                (device_id,)
+            ).fetchone()
+            if row:
+                owner_id = row["user_id"]
+        finally:
+            if close_conn:
+                con.close()
+
+        if owner_id is None:
+            status = "available"
+            if online:
+                message = "Устройство свободно и готово к подключению."
+            else:
+                message = "Устройство найдено, но сейчас не в сети."
+        elif owner_id == user_id:
+            status = "owned_by_you"
+            message = "Устройство уже привязано к вашему аккаунту."
+        else:
+            status = "occupied"
+            message = "Устройство уже привязано к другому аккаунту."
+    else:
+        status = "not_found"
+        message = "Устройство не в сети или уже привязано."
+
+    return {
+        "serial": code,
+        "device_id": device_id,
+        "status": status,
+        "online": online,
+        "message": message,
+        "owner_id": owner_id,
+    }
+
 # ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
 def _state_to_db(device_id: str, kind: str, payload):
     with db() as con:
@@ -310,6 +362,22 @@ def api_devices_pair():
     return jsonify(ok=True, device_id=device_id, name="Сушильный шкаф")
 
 
+@app.post("/api/devices/check_serial")
+@login_required
+def api_devices_check_serial():
+    if not request.is_json:
+        return jsonify(ok=False, message="Тело должно быть JSON"), 400
+
+    data = request.get_json(silent=True) or {}
+    serial = (data.get("serial") or "").strip().upper()
+
+    if len(serial) != 6 or not serial.isalnum():
+        return jsonify(ok=False, message="Серийный номер должен состоять из 6 символов"), 400
+
+    res = lookup_claim_status(serial, g.user["id"])
+    return jsonify(ok=True, **res)
+
+
 @app.post("/api/devices/manual")
 @login_required
 def api_devices_manual_add():
@@ -330,21 +398,35 @@ def api_devices_manual_add():
     program_default = FIREPLACE_MODE_OPTIONS[0][0] if kind == "fireplace" else "standard"
 
     with db() as con:
-        row = con.execute("SELECT user_id FROM devices WHERE device_id=?", (serial,)).fetchone()
-        if row:
-            if row["user_id"] != g.user["id"]:
-                return jsonify(ok=False, message="Устройство уже привязано к другому аккаунту"), 409
-            con.execute("UPDATE devices SET kind=?, name=?, program=? WHERE device_id=?",
-                        (kind, device_name, program_default, serial))
-        else:
+        claim = lookup_claim_status(serial, g.user["id"], con=con)
+        status = claim["status"]
+
+        if status == "not_found":
+            return jsonify(ok=False, message="Устройство не найдено. Проверьте питание и подключение к сети."), 404
+        if status == "occupied":
+            return jsonify(ok=False, message="Устройство уже привязано к другому аккаунту"), 409
+        if status == "owned_by_you":
+            return jsonify(ok=False, message="Устройство уже привязано к вашему аккаунту"), 409
+        if not claim.get("online", False):
+            return jsonify(ok=False, message="Устройство найдено, но сейчас не в сети"), 409
+
+        device_id = claim.get("device_id")
+        if not device_id:
+            return jsonify(ok=False, message="Не удалось определить устройство"), 400
+
+        try:
             con.execute("""
                 INSERT INTO devices (user_id, device_id, name, kind, on_state, program, last_seen, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                g.user["id"], serial, device_name, kind, 0, program_default, None, datetime.utcnow().isoformat()
+                g.user["id"], device_id, device_name, kind, 0, program_default, None, datetime.utcnow().isoformat()
             ))
+        except sqlite3.IntegrityError:
+            # На случай гонки добавления — обновляем владельца и параметры
+            con.execute("UPDATE devices SET user_id=?, kind=?, name=?, program=? WHERE device_id=?",
+                        (g.user["id"], kind, device_name, program_default, device_id))
 
-    return jsonify(ok=True, device_id=serial, kind=kind, name=device_name)
+    return jsonify(ok=True, device_id=device_id, kind=kind, name=device_name)
 
 @app.post("/api/device/<device_id>/cmd")
 @login_required
