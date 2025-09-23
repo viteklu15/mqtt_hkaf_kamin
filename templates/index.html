@@ -202,37 +202,43 @@
             <section class="p-4 sm:p-6 lg:p-8">
                 <h2 class="text-2xl font-bold">Устройства</h2>
                 <!-- <p class="mt-2 text-neutral-400">Нет подключённых устройств.</p> -->
-                <button
+                <button id="addDeviceBtn"
                     class="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/90 text-neutral-900 font-semibold">
                     Подключить новое устройство
                 </button>
+
+                {% if devices %}
                 <div class="mt-4 grid gap-4 sm:gap-6 grid-cols-1 md:grid-cols-3 items-stretch">
-                    <!-- устройста которые есть у пользователя   -->
-
-                    {{ fireplace_card(
-                    id='fire-001',
-                    title='Камин',
-                    online=false,
-                    power=False,
-                    mode_options=[('1','1'), ('2','2'), ('3','3'),('4','4')],
-                    mode_value='1',
-                    sound_options=[('1','1'), ('2','2'), ('3','3')],
-                    sound_value='1',
-                    backlight=True
-                    ) }}
-
-                    {{ dryer_card(
-                    id='dry-001',
-                    title='Сушильный шкаф',
-                    online=True,
-                    power=True,
-                    program_value='smart',
-                    sound=False,
-                    temp_c=55,
-                    time_left="01:20"
-                    ) }}
-
+                    {% for device in devices %}
+                        {% if device.kind == 'fireplace' %}
+                            {{ fireplace_card(
+                                id=device.id,
+                                title=device.title,
+                                online=device.online,
+                                power=device.power,
+                                mode_options=device.mode_options,
+                                mode_value=device.mode_value,
+                                sound_options=device.sound_options,
+                                sound_value=device.sound_value,
+                                backlight=device.backlight
+                            ) }}
+                        {% elif device.kind == 'dryer' %}
+                            {{ dryer_card(
+                                id=device.id,
+                                title=device.title,
+                                online=device.online,
+                                power=device.power,
+                                program_value=device.program_value,
+                                sound=device.sound,
+                                temp_c=device.temp_c,
+                                time_left=device.time_left
+                            ) }}
+                        {% endif %}
+                    {% endfor %}
                 </div>
+                {% else %}
+                <p class="mt-6 text-neutral-400">Нет подключённых устройств.</p>
+                {% endif %}
             </section>
         </main>
     </div>
@@ -243,6 +249,55 @@
     <footer
         class="fixed inset-x-0 bottom-0 text-center text-neutral-500 text-sm py-4 bg-neutral-950 border-t border-white/10">
         © {{ year }} Schönes Feuer</footer>
+
+    <!-- Модалка: добавление устройства -->
+    <div id="modalAddDevice" class="fixed inset-0 z-[60] hidden">
+        <div class="absolute inset-0 bg-black/60" data-close-add></div>
+        <div
+            class="relative mx-auto my-12 w-full max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6 shadow-xl">
+            <div data-step="choose">
+                <h3 class="text-lg font-semibold">Выберите устройство</h3>
+                <p class="mt-2 text-sm text-neutral-400">Какой прибор вы подключаете?</p>
+                <div class="mt-4 space-y-3">
+                    <button type="button"
+                        class="w-full px-4 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-left transition"
+                        data-kind-btn="fireplace">
+                        <div class="font-semibold">Камин</div>
+                        <div class="text-sm text-neutral-400">Электрокамин Schönes Feuer</div>
+                    </button>
+                    <button type="button"
+                        class="w-full px-4 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-left transition"
+                        data-kind-btn="dryer">
+                        <div class="font-semibold">Сушильный шкаф</div>
+                        <div class="text-sm text-neutral-400">Шкаф для сушки обуви/одежды</div>
+                    </button>
+                </div>
+                <div class="flex justify-end pt-4">
+                    <button type="button"
+                        class="px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-close-add>Отмена</button>
+                </div>
+            </div>
+            <form id="addDeviceForm" class="hidden" data-step="serial">
+                <input type="hidden" name="kind">
+                <h3 class="text-lg font-semibold">Введите серийный номер</h3>
+                <p class="mt-2 text-sm text-neutral-400">Укажите код устройства (<span data-selected-name></span>). Код
+                    указан в приложении или на устройстве.</p>
+                <label class="auth-label mt-4">Серийный номер
+                    <input type="text" name="serial" maxlength="6" minlength="6" autocomplete="off"
+                        class="auth-input tracking-[0.3em] uppercase" required inputmode="text"
+                        pattern="[A-Za-z0-9]{6}">
+                </label>
+                <div class="text-sm mt-2 text-rose-300 hidden" data-add-error></div>
+                <div class="flex gap-3 pt-4">
+                    <button type="button"
+                        class="flex-1 px-4 py-2 rounded-xl border border-white/15 hover:border-white/30"
+                        data-add-back>Назад</button>
+                    <button type="submit" class="flex-1 auth-button" data-add-submit>Подключить</button>
+                </div>
+            </form>
+        </div>
+    </div>
 
     <!-- Модалка: смена пароля -->
     <div id="modalChangePwd" class="fixed inset-0 z-[60] hidden">
@@ -483,6 +538,147 @@
                     } catch (err) {
                         deleteAccMsg.textContent = "Сеть/сервер недоступен";
                         deleteAccMsg.className = "text-sm mt-1 text-rose-300";
+                    }
+                });
+            }
+
+            // ===== Подключение нового устройства =====
+            const addDeviceBtn = document.getElementById("addDeviceBtn");
+            const modalAddDevice = document.getElementById("modalAddDevice");
+            if (addDeviceBtn && modalAddDevice) {
+                const chooseStep = modalAddDevice.querySelector('[data-step="choose"]');
+                const serialStep = modalAddDevice.querySelector('[data-step="serial"]');
+                const addDeviceForm = document.getElementById("addDeviceForm");
+                const serialInput = addDeviceForm?.querySelector('input[name="serial"]');
+                const kindInput = addDeviceForm?.querySelector('input[name="kind"]');
+                const nameSpan = modalAddDevice.querySelector('[data-selected-name]');
+                const errorEl = modalAddDevice.querySelector('[data-add-error]');
+                const submitBtn = modalAddDevice.querySelector('[data-add-submit]');
+                const backBtn = modalAddDevice.querySelector('[data-add-back]');
+                const closeEls = modalAddDevice.querySelectorAll('[data-close-add]');
+                const kindButtons = modalAddDevice.querySelectorAll('[data-kind-btn]');
+                const addUrl = "{{ url_for('api_devices_manual_add') }}";
+                const deviceNames = { fireplace: "камин", dryer: "сушильный шкаф" };
+                let currentKind = null;
+
+                function showStep(step) {
+                    if (!chooseStep || !serialStep) return;
+                    if (step === "serial") {
+                        chooseStep.classList.add("hidden");
+                        serialStep.classList.remove("hidden");
+                        setTimeout(() => serialInput?.focus(), 50);
+                    } else {
+                        chooseStep.classList.remove("hidden");
+                        serialStep.classList.add("hidden");
+                    }
+                }
+
+                function hideError() {
+                    if (!errorEl) return;
+                    errorEl.textContent = "";
+                    errorEl.classList.add("hidden");
+                }
+
+                function showError(text) {
+                    if (!errorEl) return;
+                    errorEl.textContent = text;
+                    errorEl.classList.remove("hidden");
+                }
+
+                function resetModal() {
+                    currentKind = null;
+                    addDeviceForm?.reset();
+                    if (kindInput) kindInput.value = "";
+                    if (serialInput) serialInput.value = "";
+                    if (nameSpan) nameSpan.textContent = "";
+                    if (submitBtn) {
+                        submitBtn.disabled = false;
+                        submitBtn.textContent = "Подключить";
+                    }
+                    hideError();
+                    showStep("choose");
+                }
+
+                function openAddModal() {
+                    resetModal();
+                    modalAddDevice.classList.remove("hidden");
+                    document.body.classList.add("no-scroll");
+                }
+
+                function closeAddModal() {
+                    modalAddDevice.classList.add("hidden");
+                    document.body.classList.remove("no-scroll");
+                    resetModal();
+                }
+
+                addDeviceBtn.addEventListener("click", openAddModal);
+                closeEls.forEach(el => el.addEventListener("click", closeAddModal));
+
+                modalAddDevice.addEventListener("click", (e) => {
+                    if (e.target === modalAddDevice) closeAddModal();
+                });
+
+                document.addEventListener("keydown", (e) => {
+                    if (e.key === "Escape" && !modalAddDevice.classList.contains("hidden")) closeAddModal();
+                });
+
+                kindButtons.forEach(btn => {
+                    btn.addEventListener("click", () => {
+                        const kind = btn.dataset.kindBtn;
+                        if (!kind) return;
+                        currentKind = kind;
+                        if (kindInput) kindInput.value = kind;
+                        if (nameSpan) nameSpan.textContent = deviceNames[kind] || "";
+                        hideError();
+                        showStep("serial");
+                    });
+                });
+
+                backBtn?.addEventListener("click", () => {
+                    currentKind = null;
+                    if (kindInput) kindInput.value = "";
+                    showStep("choose");
+                    hideError();
+                });
+
+                addDeviceForm?.addEventListener("submit", async (e) => {
+                    e.preventDefault();
+                    if (!currentKind || !serialInput || !submitBtn) {
+                        showError("Выберите тип устройства");
+                        return;
+                    }
+
+                    const serial = (serialInput.value || "").trim().toUpperCase();
+                    serialInput.value = serial;
+                    if (!/^[A-Z0-9]{6}$/.test(serial)) {
+                        showError("Введите 6 символов (цифры или латинские буквы).");
+                        return;
+                    }
+
+                    hideError();
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = "Подключаем...";
+
+                    try {
+                        const r = await fetch(addUrl, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ kind: currentKind, serial })
+                        });
+                        const data = await r.json().catch(() => ({}));
+                        if (r.ok && data.ok) {
+                            closeAddModal();
+                            window.location.reload();
+                        } else {
+                            showError(data.message || "Не удалось добавить устройство");
+                        }
+                    } catch (err) {
+                        showError("Сеть/сервер недоступен");
+                    } finally {
+                        if (submitBtn) {
+                            submitBtn.disabled = false;
+                            submitBtn.textContent = "Подключить";
+                        }
                     }
                 });
             }
