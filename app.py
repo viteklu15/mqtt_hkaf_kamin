@@ -13,6 +13,12 @@ DB_PATH = "sf.db"
 app = Flask(__name__)
 app.secret_key = APP_SECRET
 
+# Очереди SSE-обновлений устройств
+DEVICE_EVENT_SUBSCRIBERS = {}
+DEVICE_EVENT_LOCK = threading.Lock()
+SSE_PING_INTERVAL = 15
+
+
 FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 5)]
 FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
 
@@ -773,8 +779,3 @@ if __name__ == "__main__":
     bridge.start()
     # Отключаем авто-перезапуск, чтобы мост не стартовал дважды
     app.run(debug=True, use_reloader=False)
-# Очереди SSE-обновлений устройств
-DEVICE_EVENT_SUBSCRIBERS = {}
-DEVICE_EVENT_LOCK = threading.Lock()
-SSE_PING_INTERVAL = 15
-
