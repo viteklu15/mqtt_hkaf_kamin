@@ -1,5 +1,5 @@
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify
-import sqlite3, os
+import sqlite3, os, json
 from datetime import datetime
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -42,6 +42,7 @@ def init_db():
             kind TEXT NOT NULL DEFAULT 'dryer',
             on_state INTEGER DEFAULT 0,
             program TEXT DEFAULT NULL,
+            state_json TEXT DEFAULT NULL,
             last_seen TEXT DEFAULT NULL,
             created_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -52,6 +53,8 @@ def init_db():
         cols = {row["name"] for row in con.execute("PRAGMA table_info(devices)")}
         if "kind" not in cols:
             con.execute("ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'dryer'")
+        if "state_json" not in cols:
+            con.execute("ALTER TABLE devices ADD COLUMN state_json TEXT DEFAULT NULL")
 init_db()
 
 # ---------- Текущий пользователь ----------
@@ -77,10 +80,27 @@ def login_required(fn):
     return wrapper
 
 
+def _load_state_payload(raw_state):
+    if not raw_state:
+        return {}
+    try:
+        return json.loads(raw_state)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _bool_from_payload(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "on", "yes"}
+    return bool(value)
+
+
 def fetch_user_devices(user_id: int):
     with db() as con:
         rows = con.execute("""
-            SELECT device_id, name, kind, on_state, program, last_seen, created_at
+            SELECT device_id, name, kind, on_state, program, state_json, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (user_id,)).fetchall()
 
@@ -88,28 +108,78 @@ def fetch_user_devices(user_id: int):
     for row in rows:
         device_id = row["device_id"]
         kind = (row["kind"] or "dryer").lower()
+        state_payload = _load_state_payload(row["state_json"])
+
+        power_state = bool(row["on_state"])
+        if "on" in state_payload:
+            power_state = _bool_from_payload(state_payload.get("on"), power_state)
+
         base = {
             "id": device_id,
             "kind": kind,
             "title": row["name"] or ("Камин" if kind == "fireplace" else "Сушильный шкаф"),
             "online": bool(ONLINE.get(device_id)),
-            "power": bool(row["on_state"]),
+            "power": power_state,
+            "state": state_payload,
+            "last_seen": row["last_seen"],
+            "created_at": row["created_at"],
         }
 
         if kind == "fireplace":
+            mode_value = state_payload.get("mode")
+            if mode_value is None:
+                mode_value = row["program"] or FIREPLACE_MODE_OPTIONS[0][0]
+            else:
+                mode_value = str(mode_value)
+
+            sound_value = state_payload.get("sound")
+            if sound_value is None:
+                sound_value = FIREPLACE_SOUND_OPTIONS[0][0]
+            else:
+                sound_value = str(sound_value)
+
+            backlight = _bool_from_payload(state_payload.get("backlight"), False)
+
             base.update({
                 "mode_options": FIREPLACE_MODE_OPTIONS,
-                "mode_value": row["program"] or FIREPLACE_MODE_OPTIONS[0][0],
+                "mode_value": mode_value,
                 "sound_options": FIREPLACE_SOUND_OPTIONS,
-                "sound_value": FIREPLACE_SOUND_OPTIONS[0][0],
-                "backlight": False,
+                "sound_value": sound_value,
+                "backlight": backlight,
             })
         else:
+            program_value = state_payload.get("program")
+            if program_value is None:
+                program_value = row["program"] or "standard"
+            else:
+                program_value = str(program_value)
+
+            sound_flag = _bool_from_payload(state_payload.get("sound"), False)
+
+            temp_c = state_payload.get("temp_c")
+            if isinstance(temp_c, (int, float)):
+                temp_c = round(float(temp_c), 1)
+                if float(temp_c).is_integer():
+                    temp_c = int(temp_c)
+            elif temp_c is not None:
+                try:
+                    temp_c = float(temp_c)
+                except (TypeError, ValueError):
+                    temp_c = None
+
+            time_left = state_payload.get("time_left")
+            if isinstance(time_left, (int, float)):
+                total_seconds = int(time_left)
+                minutes, seconds = divmod(max(total_seconds, 0), 60)
+                time_left = f"{minutes:02d}:{seconds:02d}"
+            elif time_left is not None:
+                time_left = str(time_left)
+
             base.update({
-                "program_value": row["program"] or "standard",
-                "sound": False,
-                "temp_c": None,
-                "time_left": None,
+                "program_value": program_value,
+                "sound": sound_flag,
+                "temp_c": temp_c,
+                "time_left": time_left,
             })
 
         devices.append(base)
@@ -192,10 +262,20 @@ def _state_to_db(device_id: str, kind: str, payload):
             fields, values = [], []
             if "on" in payload:
                 fields.append("on_state=?")
-                values.append(1 if bool(payload["on"]) else 0)
-            if isinstance(payload.get("program"), str):
+                values.append(1 if _bool_from_payload(payload.get("on")) else 0)
+
+            program_value = None
+            if isinstance(payload.get("program"), str) and payload.get("program"):
+                program_value = payload["program"]
+            elif isinstance(payload.get("mode"), str) and payload.get("mode"):
+                program_value = payload["mode"]
+
+            if program_value is not None:
                 fields.append("program=?")
-                values.append(payload["program"])
+                values.append(program_value)
+
+            fields.append("state_json=?")
+            values.append(json.dumps(payload, ensure_ascii=False))
             fields.append("last_seen=?")
             values.append(datetime.utcnow().isoformat())
             sql = f"UPDATE devices SET {', '.join(fields)} WHERE device_id=?"
@@ -315,22 +395,50 @@ def account_delete():
 def api_devices_list():
     with db() as con:
         rows = con.execute("""
-            SELECT device_id, name, kind, on_state, program, last_seen, created_at
+            SELECT device_id, name, kind, on_state, program, state_json, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (g.user["id"],)).fetchall()
     devices = []
     for r in rows:
         dev_id = r["device_id"]
-        devices.append({
+        kind = (r["kind"] or "dryer").lower()
+        state_payload = _load_state_payload(r["state_json"])
+
+        power_state = bool(r["on_state"])
+        if "on" in state_payload:
+            power_state = _bool_from_payload(state_payload.get("on"), power_state)
+
+        device_info = {
             "device_id": dev_id,
             "name": r["name"],
-            "kind": (r["kind"] or "dryer"),
+            "kind": kind,
             "online": bool(ONLINE.get(dev_id)),
-            "on": bool(r["on_state"]),
+            "on": power_state,
             "program": r["program"],
             "last_seen": r["last_seen"],
             "created_at": r["created_at"],
-        })
+            "state": state_payload,
+        }
+
+        if kind == "fireplace":
+            if "mode" in state_payload and isinstance(state_payload.get("mode"), str):
+                device_info["program"] = state_payload["mode"]
+            device_info.update({
+                "mode": state_payload.get("mode"),
+                "sound": state_payload.get("sound"),
+                "backlight": _bool_from_payload(state_payload.get("backlight"), False),
+            })
+        else:
+            program_value = state_payload.get("program")
+            if isinstance(program_value, str):
+                device_info["program"] = program_value
+            device_info.update({
+                "sound": _bool_from_payload(state_payload.get("sound"), False),
+                "temp_c": state_payload.get("temp_c"),
+                "time_left": state_payload.get("time_left"),
+            })
+
+        devices.append(device_info)
     return jsonify(ok=True, devices=devices)
 
 @app.post("/api/devices/pair")
