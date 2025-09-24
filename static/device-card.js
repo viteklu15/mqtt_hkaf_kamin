@@ -22,6 +22,9 @@ const REFRESH_INTERVAL = 5000;
 const deviceCards = new Map();
 let refreshTimerId = null;
 let refreshInFlight = false;
+const STREAM_RETRY_DELAY = 5000;
+let deviceStream = null;
+let deviceStreamReconnectTimer = null;
 
 function boolFromValue(value, defaultValue = false) {
   if (value === undefined || value === null) {
@@ -225,6 +228,67 @@ function stopDevicePolling() {
   }
 }
 
+function closeDeviceStream() {
+  if (deviceStream) {
+    deviceStream.close();
+    deviceStream = null;
+  }
+  if (deviceStreamReconnectTimer) {
+    clearTimeout(deviceStreamReconnectTimer);
+    deviceStreamReconnectTimer = null;
+  }
+}
+
+function scheduleStreamReconnect() {
+  if (deviceStreamReconnectTimer) return;
+  deviceStreamReconnectTimer = setTimeout(() => {
+    deviceStreamReconnectTimer = null;
+    setupDeviceStream();
+  }, STREAM_RETRY_DELAY);
+}
+
+function setupDeviceStream() {
+  if (!deviceCards.size) {
+    closeDeviceStream();
+    return;
+  }
+  if (!('EventSource' in window)) {
+    return;
+  }
+  if (deviceStream) {
+    return;
+  }
+  try {
+    const source = new EventSource('/api/devices/stream');
+    source.onmessage = (event) => {
+      if (!event.data) return;
+      let payload;
+      try {
+        payload = JSON.parse(event.data);
+      } catch (err) {
+        console.warn('Некорректные данные потока устройств', err);
+        return;
+      }
+      const device = payload?.device || payload;
+      if (!device || !device.device_id) return;
+      const card = deviceCards.get(device.device_id);
+      if (card) {
+        updateDeviceCard(card, device);
+      }
+    };
+    source.addEventListener('error', () => {
+      if (source.readyState === EventSource.CLOSED) {
+        closeDeviceStream();
+        scheduleStreamReconnect();
+      }
+    });
+    deviceStream = source;
+  } catch (err) {
+    console.warn('Не удалось подключиться к потоку устройств', err);
+    scheduleStreamReconnect();
+  }
+}
+
 function scheduleNextRefresh(delay = REFRESH_INTERVAL) {
   if (!deviceCards.size) {
     stopDevicePolling();
@@ -402,21 +466,23 @@ function initDeviceCards(root = document) {
       try {
         const r = await api.remove(id);
         const data = await r.json().catch(() => ({}));
-        if (r.ok && data.ok !== false) {
-          closeModal();
-          card.remove();
-          deviceCards.delete(id);
-          if (!deviceCards.size) {
-            stopDevicePolling();
+          if (r.ok && data.ok !== false) {
+            closeModal();
+            card.remove();
+            deviceCards.delete(id);
+            if (!deviceCards.size) {
+              stopDevicePolling();
+              closeDeviceStream();
+            }
+          } else {
+            alert(data.message || 'Не удалось удалить устройство');
           }
-        } else {
-          alert(data.message || 'Не удалось удалить устройство');
-        }
       } catch {
         alert('Сеть/сервер недоступен');
       }
     });
   });
+  setupDeviceStream();
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -428,6 +494,7 @@ document.addEventListener('visibilitychange', () => {
 document.addEventListener('DOMContentLoaded', () => {
   initDeviceCards();
   startDevicePolling();
+  setupDeviceStream();
 });
 
 export { initDeviceCards };
