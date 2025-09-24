@@ -1,28 +1,306 @@
 // static/device-card.js
 const api = {
   power: (id, on) => fetch(`/api/device/${encodeURIComponent(id)}/power`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ on: !!on })
   }),
   set: (id, key, value) => fetch(`/api/device/${encodeURIComponent(id)}/set`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ [key]: value })
   }),
   rename: (id, title) => fetch(`/api/device/${encodeURIComponent(id)}/rename`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ title })
   }),
   remove: (id) => fetch(`/api/device/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
+const REFRESH_INTERVAL = 5000;
+const deviceCards = new Map();
+let refreshTimerId = null;
+let refreshInFlight = false;
+
+function boolFromValue(value, defaultValue = false) {
+  if (value === undefined || value === null) {
+    return defaultValue;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) return defaultValue;
+    if (['0', 'false', 'off', 'no'].includes(normalized)) return false;
+    if (['1', 'true', 'on', 'yes'].includes(normalized)) return true;
+    return defaultValue;
+  }
+  return Boolean(value);
+}
+
+function formatTemperature(value) {
+  if (value === undefined || value === null) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  const rounded = Math.round(num * 10) / 10;
+  if (Math.abs(rounded - Math.round(rounded)) < 1e-6) {
+    return String(Math.round(rounded));
+  }
+  return rounded.toFixed(1);
+}
+
+function formatTimeLeft(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const totalSeconds = Math.max(0, Math.floor(value));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  return null;
+}
+
+function updateSelectValue(select, rawValue) {
+  if (!select || rawValue === undefined || rawValue === null) return;
+  const value = String(rawValue);
+  if (select.value === value) return;
+  let hasOption = false;
+  for (const option of select.options) {
+    if (option.value === value) {
+      hasOption = true;
+      break;
+    }
+  }
+  if (!hasOption) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    option.hidden = true;
+    select.appendChild(option);
+  }
+  select.value = value;
+}
+
+function updatePowerButton(button, power, online) {
+  if (!button) return;
+  button.setAttribute('aria-pressed', power ? 'true' : 'false');
+  button.toggleAttribute('disabled', !online);
+  button.classList.toggle('opacity-50', !online);
+  button.classList.toggle('pointer-events-none', !online);
+  const icon = button.querySelector('svg');
+  if (icon) {
+    icon.classList.toggle('text-emerald-400', power);
+    icon.classList.toggle('text-neutral-400', !power);
+  }
+}
+
+function updateDryerCard(card, device, { power }) {
+  const state = device.state || {};
+  const tempSource = device.temp_c ?? state.temp_c;
+  const formattedTemp = formatTemperature(tempSource);
+  const tempEl = card.querySelector('[data-temp]');
+  if (tempEl) {
+    if (power && formattedTemp !== null) {
+      tempEl.textContent = `${formattedTemp}°C`;
+      tempEl.classList.add('text-emerald-400');
+      tempEl.classList.remove('text-neutral-500');
+    } else {
+      tempEl.textContent = '—';
+      tempEl.classList.remove('text-emerald-400');
+      tempEl.classList.add('text-neutral-500');
+    }
+  }
+
+  const timeSource = device.time_left ?? state.time_left;
+  const formattedTime = formatTimeLeft(timeSource);
+  const timeEl = card.querySelector('[data-time]');
+  if (timeEl) {
+    if (power && formattedTime) {
+      timeEl.textContent = formattedTime;
+      timeEl.classList.add('text-emerald-400');
+      timeEl.classList.remove('text-neutral-500');
+    } else {
+      timeEl.textContent = '—';
+      timeEl.classList.remove('text-emerald-400');
+      timeEl.classList.add('text-neutral-500');
+    }
+  }
+}
+
+function updateFireplaceCard(card, device) {
+  const state = device.state || {};
+  const modeSelect = card.querySelector('select[data-select="mode"]');
+  updateSelectValue(modeSelect, device.mode ?? state.mode);
+  const soundSelect = card.querySelector('select[data-select="sound"]');
+  updateSelectValue(soundSelect, device.sound ?? state.sound);
+}
+
+function updateDeviceCard(card, device) {
+  if (!card || !device) return;
+  const kind = (card.dataset.deviceKind || device.kind || '').toLowerCase();
+  const state = device.state || {};
+  const online = Boolean(device.online);
+
+  const titleEl = card.querySelector('[data-device-title]');
+  if (titleEl && device.name) {
+    titleEl.textContent = device.name;
+  }
+
+  const indicator = card.querySelector('[data-online-indicator]');
+  if (indicator) {
+    indicator.classList.toggle('bg-emerald-400', online);
+    indicator.classList.toggle('bg-red-500', !online);
+  }
+  const onlineText = card.querySelector('[data-online-text]');
+  if (onlineText) {
+    onlineText.textContent = online ? 'онлайн' : 'оффлайн';
+  }
+
+  card.querySelectorAll('[data-online-wrapper]').forEach((wrapper) => {
+    wrapper.classList.toggle('opacity-50', !online);
+    wrapper.classList.toggle('pointer-events-none', !online);
+  });
+
+  const power = boolFromValue(
+    device.on ?? state.on ?? device.power,
+    card.querySelector('[data-power]')?.getAttribute('aria-pressed') === 'true'
+  );
+
+  card.querySelectorAll('[data-power]').forEach((btn) => updatePowerButton(btn, power, online));
+
+  card.querySelectorAll('select[data-select]').forEach((select) => {
+    const key = select.dataset.select;
+    let rawValue = null;
+    if (key === 'mode') {
+      rawValue = device.mode ?? state.mode;
+    } else if (key === 'sound' && kind === 'fireplace') {
+      rawValue = device.sound ?? state.sound;
+    } else if (key === 'program') {
+      rawValue = device.program ?? state.program;
+    } else if (state && Object.prototype.hasOwnProperty.call(state, key)) {
+      rawValue = state[key];
+    }
+    updateSelectValue(select, rawValue);
+    select.disabled = !online;
+    select.classList.toggle('opacity-50', !online);
+    select.classList.toggle('pointer-events-none', !online);
+  });
+
+  card.querySelectorAll('input[type="checkbox"][data-toggle]').forEach((checkbox) => {
+    const key = checkbox.dataset.toggle;
+    let rawValue = null;
+    if (key === 'backlight') {
+      rawValue = device.backlight ?? state.backlight;
+    } else if (key === 'sound') {
+      rawValue = device.sound ?? state.sound;
+    } else if (state && Object.prototype.hasOwnProperty.call(state, key)) {
+      rawValue = state[key];
+    } else if (key && Object.prototype.hasOwnProperty.call(device, key)) {
+      rawValue = device[key];
+    }
+    checkbox.checked = boolFromValue(rawValue, checkbox.checked);
+    checkbox.disabled = !online;
+  });
+
+  if (kind === 'dryer') {
+    updateDryerCard(card, device, { power });
+  } else if (kind === 'fireplace') {
+    updateFireplaceCard(card, device);
+  }
+}
+
+function stopDevicePolling() {
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+    refreshTimerId = null;
+  }
+}
+
+function scheduleNextRefresh(delay = REFRESH_INTERVAL) {
+  if (!deviceCards.size) {
+    stopDevicePolling();
+    return;
+  }
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+  }
+  refreshTimerId = setTimeout(() => {
+    runRefresh();
+  }, delay);
+}
+
+async function runRefresh() {
+  if (refreshInFlight || !deviceCards.size) return;
+  if (refreshTimerId) {
+    clearTimeout(refreshTimerId);
+    refreshTimerId = null;
+  }
+
+  refreshInFlight = true;
+  let nextDelay = REFRESH_INTERVAL;
+  let shouldSchedule = true;
+
+  try {
+    const response = await fetch('/api/devices', { headers: { Accept: 'application/json' } });
+    if (response.status === 401 || response.status === 403) {
+      shouldSchedule = false;
+      stopDevicePolling();
+      return;
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json().catch(() => ({}));
+    if (!payload || payload.ok === false || !Array.isArray(payload.devices)) {
+      throw new Error('Bad payload');
+    }
+
+    payload.devices.forEach((device) => {
+      if (!device || !device.device_id) return;
+      const card = deviceCards.get(device.device_id);
+      if (card) {
+        updateDeviceCard(card, device);
+      }
+    });
+  } catch (err) {
+    console.error('Не удалось обновить состояние устройств', err);
+    nextDelay = REFRESH_INTERVAL * 2;
+  } finally {
+    refreshInFlight = false;
+    if (shouldSchedule) {
+      scheduleNextRefresh(nextDelay);
+    }
+  }
+}
+
+function startDevicePolling() {
+  if (!deviceCards.size) return;
+  stopDevicePolling();
+  runRefresh();
+}
+
 function initDeviceCards(root = document) {
-  root.querySelectorAll('[data-device-id]').forEach(card => {
+  root.querySelectorAll('[data-device-id]').forEach((card) => {
+    if (!card || card.dataset.deviceInit === '1') return;
     const id = card.dataset.deviceId;
+    if (!id) return;
+    card.dataset.deviceInit = '1';
+    deviceCards.set(id, card);
+
     const titleEl = card.querySelector('[data-device-title]');
 
-    // ===== Питание =====
-    card.querySelectorAll('[data-power]').forEach(btn => {
+    card.querySelectorAll('[data-power]').forEach((btn) => {
       btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
         const prev = btn.getAttribute('aria-pressed') === 'true';
         const next = !prev;
         btn.setAttribute('aria-pressed', String(next));
@@ -37,23 +315,30 @@ function initDeviceCards(root = document) {
       });
     });
 
-    // ===== Списки =====
-    card.querySelectorAll('select[data-select]').forEach(sel => {
-      sel.addEventListener('change', async () => {
-        try { await api.set(id, sel.dataset.select, sel.value); }
-        catch { alert('Не удалось применить параметр'); }
+    card.querySelectorAll('select[data-select]').forEach((select) => {
+      select.addEventListener('change', async () => {
+        if (select.disabled) return;
+        try {
+          await api.set(id, select.dataset.select, select.value);
+        } catch (err) {
+          console.error(err);
+          alert('Не удалось применить параметр');
+        }
       });
     });
 
-    // ===== Тумблеры =====
-    card.querySelectorAll('input[type="checkbox"][data-toggle]').forEach(chk => {
-      chk.addEventListener('change', async () => {
-        try { await api.set(id, chk.dataset.toggle, chk.checked); }
-        catch { alert('Не удалось применить переключатель'); }
+    card.querySelectorAll('input[type="checkbox"][data-toggle]').forEach((checkbox) => {
+      checkbox.addEventListener('change', async () => {
+        if (checkbox.disabled) return;
+        try {
+          await api.set(id, checkbox.dataset.toggle, checkbox.checked);
+        } catch (err) {
+          console.error(err);
+          alert('Не удалось применить переключатель');
+        }
       });
     });
 
-    // ===== Настройки (модалка) =====
     const modal = card.querySelector('[data-settings-modal]');
     const openBtn = card.querySelector('[data-open-settings]');
     const closeEls = card.querySelectorAll('[data-close-settings]');
@@ -64,7 +349,7 @@ function initDeviceCards(root = document) {
     function openModal() {
       modal?.classList.remove('hidden');
       document.body.classList.add('no-scroll');
-      msg && (msg.textContent = '');
+      if (msg) msg.textContent = '';
       if (form?.title) form.title.value = titleEl?.textContent?.trim() || '';
     }
     function closeModal() {
@@ -73,38 +358,45 @@ function initDeviceCards(root = document) {
     }
 
     openBtn?.addEventListener('click', openModal);
-    closeEls.forEach(el => el.addEventListener('click', closeModal));
+    closeEls.forEach((el) => el.addEventListener('click', closeModal));
     modal?.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
     document.addEventListener('keydown', (e) => {
       if (!modal || modal.classList.contains('hidden')) return;
       if (e.key === 'Escape') closeModal();
     });
 
-    // Сохранить имя
     form?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const title = form.title.value.trim();
       if (!title) return;
-      msg.textContent = '';
+      if (msg) {
+        msg.textContent = '';
+        msg.className = 'text-sm mt-2';
+      }
       try {
         const r = await api.rename(id, title);
         const data = await r.json().catch(() => ({}));
         if (r.ok && data.ok !== false) {
           if (titleEl) titleEl.textContent = title;
-          msg.textContent = 'Сохранено';
-          msg.className = 'text-sm mt-2 text-emerald-300';
+          if (msg) {
+            msg.textContent = 'Сохранено';
+            msg.className = 'text-sm mt-2 text-emerald-300';
+          }
           setTimeout(closeModal, 600);
         } else {
-          msg.textContent = data.message || 'Не удалось сохранить';
-          msg.className = 'text-sm mt-2 text-rose-300';
+          if (msg) {
+            msg.textContent = data.message || 'Не удалось сохранить';
+            msg.className = 'text-sm mt-2 text-rose-300';
+          }
         }
       } catch {
-        msg.textContent = 'Сеть/сервер недоступен';
-        msg.className = 'text-sm mt-2 text-rose-300';
+        if (msg) {
+          msg.textContent = 'Сеть/сервер недоступен';
+          msg.className = 'text-sm mt-2 text-rose-300';
+        }
       }
     });
 
-    // Удалить устройство
     delBtn?.addEventListener('click', async () => {
       if (!confirm('Удалить устройство? Действие необратимо.')) return;
       try {
@@ -113,6 +405,10 @@ function initDeviceCards(root = document) {
         if (r.ok && data.ok !== false) {
           closeModal();
           card.remove();
+          deviceCards.delete(id);
+          if (!deviceCards.size) {
+            stopDevicePolling();
+          }
         } else {
           alert(data.message || 'Не удалось удалить устройство');
         }
@@ -123,5 +419,15 @@ function initDeviceCards(root = document) {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => initDeviceCards());
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && deviceCards.size) {
+    runRefresh();
+  }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  initDeviceCards();
+  startDevicePolling();
+});
+
 export { initDeviceCards };

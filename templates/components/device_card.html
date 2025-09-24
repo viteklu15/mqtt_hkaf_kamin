@@ -11,9 +11,10 @@ backlight=False) %}
     <!-- Заголовок -->
     <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
-            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"></div>
+            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"
+                data-online-indicator></div>
             <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
-            <span class="text-xs text-neutral-400">{{ 'онлайн' if online else 'оффлайн' }}</span>
+            <span class="text-xs text-neutral-400" data-online-text>{{ 'онлайн' if online else 'оффлайн' }}</span>
         </div>
         <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -67,8 +68,9 @@ backlight=False) %}
             </div>
         </div>
 
-        <label class="flex items-center gap-3 pt-2 md:col-span-2 
-                      {{ '' if online else 'opacity-50 pointer-events-none' }}">
+        <label class="flex items-center gap-3 pt-2 md:col-span-2
+                      {{ '' if online else 'opacity-50 pointer-events-none' }}"
+            data-online-wrapper>
             <input type="checkbox" class="h-5 w-5 rounded bg-neutral-900 border-white/20"
                 data-toggle="backlight" {{ 'checked' if backlight else '' }} {{ '' if online else 'disabled' }}>
             <span class="text-sm">Подсветка</span>
@@ -131,9 +133,10 @@ time_left=None) %}
     <!-- Заголовок -->
     <div class="flex items-center justify-between">
         <div class="flex items-center gap-3">
-            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"></div>
+            <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"
+                data-online-indicator></div>
             <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
-            <span class="text-xs text-neutral-400">{{ 'онлайн' if online else 'оффлайн' }}</span>
+            <span class="text-xs text-neutral-400" data-online-text>{{ 'онлайн' if online else 'оффлайн' }}</span>
         </div>
         <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings aria-label="Настройки">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -202,8 +205,9 @@ time_left=None) %}
             </select>
         </div>
 
-        <label class="flex items-center gap-3 pt-2 md:col-span-2 
-                      {{ '' if online else 'opacity-50 pointer-events-none' }}">
+        <label class="flex items-center gap-3 pt-2 md:col-span-2
+                      {{ '' if online else 'opacity-50 pointer-events-none' }}"
+            data-online-wrapper>
             <input type="checkbox" class="h-5 w-5 rounded bg-neutral-900 border-white/20"
                 data-toggle="sound" {{ 'checked' if sound else '' }} {{ '' if online else 'disabled' }}>
             <span class="text-sm">Звук</span>
