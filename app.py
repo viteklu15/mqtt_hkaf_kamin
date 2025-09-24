@@ -146,7 +146,7 @@ def fetch_user_devices(user_id: int):
     with db() as con:
         rows = con.execute("""
             SELECT device_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
-            FROM devices WHERE user_id=? ORDER BY created_at DESC
+            FROM devices WHERE user_id=? ORDER BY created_at ASC
         """, (user_id,)).fetchall()
 
     devices = []
@@ -510,7 +510,7 @@ def api_devices_list():
     with db() as con:
         rows = con.execute("""
             SELECT device_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
-            FROM devices WHERE user_id=? ORDER BY created_at DESC
+            FROM devices WHERE user_id=? ORDER BY created_at ASC
         """, (g.user["id"],)).fetchall()
     devices = [_build_device_api_payload(r) for r in rows]
     return jsonify(ok=True, devices=devices)
