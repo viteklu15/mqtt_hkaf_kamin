@@ -1,5 +1,5 @@
-from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify
-import sqlite3, os, json
+from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
+import sqlite3, os, json, queue, threading
 from datetime import datetime
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -71,6 +71,42 @@ def load_user_to_g():
     g.user = current_user()
 
 # ---------- Хелперы ----------
+def _subscribe_device_events(user_id: int):
+    if not user_id:
+        return None
+    q = queue.Queue()
+    with DEVICE_EVENT_LOCK:
+        DEVICE_EVENT_SUBSCRIBERS.setdefault(user_id, set()).add(q)
+    return q
+
+
+def _unsubscribe_device_events(user_id: int, q):
+    if not user_id or q is None:
+        return
+    with DEVICE_EVENT_LOCK:
+        listeners = DEVICE_EVENT_SUBSCRIBERS.get(user_id)
+        if not listeners:
+            return
+        listeners.discard(q)
+        if not listeners:
+            DEVICE_EVENT_SUBSCRIBERS.pop(user_id, None)
+
+
+def _broadcast_device_event(user_id: int, kind: str, device_payload: dict):
+    if not user_id or not device_payload:
+        return
+    with DEVICE_EVENT_LOCK:
+        listeners = list(DEVICE_EVENT_SUBSCRIBERS.get(user_id, ()))
+    if not listeners:
+        return
+    message = {"type": kind, "device": device_payload}
+    for q in listeners:
+        try:
+            q.put_nowait(message)
+        except queue.Full:
+            continue
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -185,6 +221,48 @@ def fetch_user_devices(user_id: int):
         devices.append(base)
     return devices
 
+
+def _build_device_api_payload(row):
+    dev_id = row["device_id"]
+    kind = (row["kind"] or "dryer").lower()
+    state_payload = _load_state_payload(row["state_json"])
+
+    power_state = bool(row["on_state"])
+    if "on" in state_payload:
+        power_state = _bool_from_payload(state_payload.get("on"), power_state)
+
+    device_info = {
+        "device_id": dev_id,
+        "name": row["name"],
+        "kind": kind,
+        "online": bool(ONLINE.get(dev_id)),
+        "on": power_state,
+        "program": row["program"],
+        "last_seen": row["last_seen"],
+        "created_at": row["created_at"],
+        "state": state_payload,
+    }
+
+    if kind == "fireplace":
+        if "mode" in state_payload and isinstance(state_payload.get("mode"), str):
+            device_info["program"] = state_payload["mode"]
+        device_info.update({
+            "mode": state_payload.get("mode"),
+            "sound": state_payload.get("sound"),
+            "backlight": _bool_from_payload(state_payload.get("backlight"), False),
+        })
+    else:
+        program_value = state_payload.get("program")
+        if isinstance(program_value, str):
+            device_info["program"] = program_value
+        device_info.update({
+            "sound": _bool_from_payload(state_payload.get("sound"), False),
+            "temp_c": state_payload.get("temp_c"),
+            "time_left": state_payload.get("time_left"),
+        })
+
+    return device_info
+
 # ---------- Проверка серийного номера через MQTT индекс ----------
 def lookup_claim_status(serial: str, user_id: int, con=None):
     """Возвращает информацию о статусе устройства по серийному номеру."""
@@ -247,16 +325,38 @@ def _pair_error_message(error_code: str) -> str:
     return friendly.get(code, code)
 
 
+def _load_device_payload_for_user(con, device_id: str, user_id: int):
+    if not user_id:
+        return None
+    row = con.execute(
+        """
+        SELECT device_id, user_id, name, kind, on_state, program, state_json, last_seen, created_at
+        FROM devices WHERE device_id=?
+        """,
+        (device_id,),
+    ).fetchone()
+    if not row or row["user_id"] != user_id:
+        return None
+    return _build_device_api_payload(row)
+
+
 # ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
 def _state_to_db(device_id: str, kind: str, payload):
     with db() as con:
-        row = con.execute("SELECT id FROM devices WHERE device_id=?", (device_id,)).fetchone()
+        row = con.execute(
+            "SELECT id, user_id FROM devices WHERE device_id=?",
+            (device_id,),
+        ).fetchone()
         if not row:
             return
+        user_id = row["user_id"]
         if kind == "availability":
             if payload is True:
                 con.execute("UPDATE devices SET last_seen=? WHERE device_id=?",
                             (datetime.utcnow().isoformat(), device_id))
+            device_payload = _load_device_payload_for_user(con, device_id, user_id)
+            if device_payload:
+                _broadcast_device_event(user_id, kind, device_payload)
             return
         if kind == "state" and isinstance(payload, dict):
             fields, values = [], []
@@ -281,6 +381,9 @@ def _state_to_db(device_id: str, kind: str, payload):
             sql = f"UPDATE devices SET {', '.join(fields)} WHERE device_id=?"
             values.append(device_id)
             con.execute(sql, tuple(values))
+            device_payload = _load_device_payload_for_user(con, device_id, user_id)
+            if device_payload:
+                _broadcast_device_event(user_id, kind, device_payload)
 
 register_state_handler(_state_to_db)
 
@@ -398,48 +501,39 @@ def api_devices_list():
             SELECT device_id, name, kind, on_state, program, state_json, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (g.user["id"],)).fetchall()
-    devices = []
-    for r in rows:
-        dev_id = r["device_id"]
-        kind = (r["kind"] or "dryer").lower()
-        state_payload = _load_state_payload(r["state_json"])
-
-        power_state = bool(r["on_state"])
-        if "on" in state_payload:
-            power_state = _bool_from_payload(state_payload.get("on"), power_state)
-
-        device_info = {
-            "device_id": dev_id,
-            "name": r["name"],
-            "kind": kind,
-            "online": bool(ONLINE.get(dev_id)),
-            "on": power_state,
-            "program": r["program"],
-            "last_seen": r["last_seen"],
-            "created_at": r["created_at"],
-            "state": state_payload,
-        }
-
-        if kind == "fireplace":
-            if "mode" in state_payload and isinstance(state_payload.get("mode"), str):
-                device_info["program"] = state_payload["mode"]
-            device_info.update({
-                "mode": state_payload.get("mode"),
-                "sound": state_payload.get("sound"),
-                "backlight": _bool_from_payload(state_payload.get("backlight"), False),
-            })
-        else:
-            program_value = state_payload.get("program")
-            if isinstance(program_value, str):
-                device_info["program"] = program_value
-            device_info.update({
-                "sound": _bool_from_payload(state_payload.get("sound"), False),
-                "temp_c": state_payload.get("temp_c"),
-                "time_left": state_payload.get("time_left"),
-            })
-
-        devices.append(device_info)
+    devices = [_build_device_api_payload(r) for r in rows]
     return jsonify(ok=True, devices=devices)
+
+
+@app.get("/api/devices/stream")
+@login_required
+def api_devices_stream():
+    user_id = g.user["id"]
+    q = _subscribe_device_events(user_id)
+    if q is None:
+        return jsonify(ok=False, message="stream_not_available"), 503
+
+    def generator():
+        yield ": connected\n\n"
+        try:
+            while True:
+                try:
+                    item = q.get(timeout=SSE_PING_INTERVAL)
+                except queue.Empty:
+                    yield ": keep-alive\n\n"
+                    continue
+                if not item:
+                    continue
+                payload = json.dumps(item, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
+        finally:
+            _unsubscribe_device_events(user_id, q)
+
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "X-Accel-Buffering": "no",
+    }
+    return Response(stream_with_context(generator()), mimetype="text/event-stream", headers=headers)
 
 @app.post("/api/devices/pair")
 @login_required
@@ -679,3 +773,8 @@ if __name__ == "__main__":
     bridge.start()
     # Отключаем авто-перезапуск, чтобы мост не стартовал дважды
     app.run(debug=True, use_reloader=False)
+# Очереди SSE-обновлений устройств
+DEVICE_EVENT_SUBSCRIBERS = {}
+DEVICE_EVENT_LOCK = threading.Lock()
+SSE_PING_INTERVAL = 15
+
