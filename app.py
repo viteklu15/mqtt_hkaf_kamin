@@ -167,6 +167,16 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
         "owner_id": owner_id,
     }
 
+
+def _pair_error_message(error_code: str) -> str:
+    code = (error_code or "unknown").strip()
+    friendly = {
+        "bad_code": "устройство отклонило код привязки",
+        "timeout_no_pair_result": "устройство не ответило на запрос",
+    }
+    return friendly.get(code, code)
+
+
 # ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
 def _state_to_db(device_id: str, kind: str, payload):
     with db() as con:
@@ -337,7 +347,7 @@ def api_devices_pair():
 
     res = bridge.publish_pair_and_wait(device_id, code, timeout_sec=12)
     if not res.get("ok"):
-        return jsonify(ok=False, message=f"Ошибка привязки: {res.get('error','unknown')}"), 502
+        return jsonify(ok=False, message=f"Ошибка привязки: {_pair_error_message(res.get('error'))}"), 502
 
     with db() as con:
         exists = con.execute("SELECT 1 FROM devices WHERE device_id=?", (device_id,)).fetchone()
@@ -413,6 +423,10 @@ def api_devices_manual_add():
         device_id = claim.get("device_id")
         if not device_id:
             return jsonify(ok=False, message="Не удалось определить устройство"), 400
+
+        pair_result = bridge.publish_pair_and_wait(device_id, serial, timeout_sec=12)
+        if not pair_result.get("ok"):
+            return jsonify(ok=False, message=f"Ошибка привязки: {_pair_error_message(pair_result.get('error'))}"), 502
 
         try:
             con.execute("""
