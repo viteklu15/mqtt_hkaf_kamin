@@ -220,7 +220,8 @@
                                 mode_value=device.mode_value,
                                 sound_options=device.sound_options,
                                 sound_value=device.sound_value,
-                                backlight=device.backlight
+                                backlight=device.backlight,
+                                serial=device.serial
                             ) }}
                         {% elif device.kind == 'dryer' %}
                             {{ dryer_card(
@@ -231,7 +232,8 @@
                                 program_value=device.program_value,
                                 sound=device.sound,
                                 temp_c=device.temp_c,
-                                time_left=device.time_left
+                                time_left=device.time_left,
+                                serial=device.serial
                             ) }}
                         {% endif %}
                     {% endfor %}

@@ -193,9 +193,17 @@ function updateDeviceCard(card, device) {
     indicator.classList.toggle('bg-emerald-400', online);
     indicator.classList.toggle('bg-red-500', !online);
   }
+  const rawSerial = typeof device.serial === 'string' ? device.serial.trim().toUpperCase() : '';
+  if (rawSerial) {
+    card.dataset.deviceSerial = rawSerial;
+  } else {
+    delete card.dataset.deviceSerial;
+  }
   const onlineText = card.querySelector('[data-online-text]');
   if (onlineText) {
-    onlineText.textContent = online ? 'онлайн' : 'оффлайн';
+    const statusText = online ? 'онлайн' : 'оффлайн';
+    const suffix = rawSerial ? ` · SN:${rawSerial}` : '';
+    onlineText.textContent = `${statusText}${suffix}`;
     onlineText.classList.remove('text-neutral-400', 'text-neutral-600');
     onlineText.classList.add(online ? 'text-neutral-400' : 'text-neutral-600');
   }
