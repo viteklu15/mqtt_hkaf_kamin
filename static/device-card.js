@@ -101,42 +101,72 @@ function updatePowerButton(button, power, online) {
   button.classList.toggle('pointer-events-none', !online);
   const icon = button.querySelector('svg');
   if (icon) {
-    icon.classList.toggle('text-emerald-400', power);
-    icon.classList.toggle('text-neutral-400', !power);
+    icon.classList.remove('text-emerald-400', 'text-neutral-400');
+    icon.classList.add(online && power ? 'text-emerald-400' : 'text-neutral-400');
   }
 }
 
-function updateDryerCard(card, device, { power }) {
+/* ====== НОВОЕ: универсальная окраска + установка значения ====== */
+function setValueAndColor(el, { online, power, value, suffix }) {
+  if (!el) return;
+  el.classList.remove('text-emerald-400', 'text-neutral-500', 'text-neutral-700');
+
+  if (online && power) {
+    el.classList.add('text-emerald-400');
+  } else if (online && !power) {
+    el.classList.add('text-neutral-500');
+  } else {
+    el.classList.add('text-neutral-700'); // offline — темнее
+  }
+
+  if (online && power && value != null && value !== '') {
+    el.textContent = suffix ? `${value}${suffix}` : `${value}`;
+  } else {
+    el.textContent = '—';
+  }
+}
+
+/* НОВОЕ: чтение текущих значений из DOM для мгновенного UI после клика */
+function getDisplayedMetrics(card) {
+  const tempText = card.querySelector('[data-temp]')?.textContent?.trim();
+  const timeText = card.querySelector('[data-time]')?.textContent?.trim();
+
+  let temp_c = null;
+  if (tempText && tempText !== '—') {
+    const num = Number(tempText.replace(/[^\d.,-]/g, '').replace(',', '.'));
+    temp_c = Number.isFinite(num) ? num : null;
+  }
+
+  let time_left = null;
+  if (timeText && timeText !== '—') {
+    time_left = timeText;
+  }
+  return { temp_c, time_left };
+}
+
+/* ====== ИСПРАВЛЕНО: теперь учитываем online при отрисовке сушилки ====== */
+function updateDryerCard(card, device, { power, online }) {
   const state = device.state || {};
+
   const tempSource = device.temp_c ?? state.temp_c;
   const formattedTemp = formatTemperature(tempSource);
   const tempEl = card.querySelector('[data-temp]');
-  if (tempEl) {
-    if (power && formattedTemp !== null) {
-      tempEl.textContent = `${formattedTemp}°C`;
-      tempEl.classList.add('text-emerald-400');
-      tempEl.classList.remove('text-neutral-500');
-    } else {
-      tempEl.textContent = '—';
-      tempEl.classList.remove('text-emerald-400');
-      tempEl.classList.add('text-neutral-500');
-    }
-  }
+  setValueAndColor(tempEl, {
+    online,
+    power,
+    value: formattedTemp,
+    suffix: '°C'
+  });
 
   const timeSource = device.time_left ?? state.time_left;
   const formattedTime = formatTimeLeft(timeSource);
   const timeEl = card.querySelector('[data-time]');
-  if (timeEl) {
-    if (power && formattedTime) {
-      timeEl.textContent = formattedTime;
-      timeEl.classList.add('text-emerald-400');
-      timeEl.classList.remove('text-neutral-500');
-    } else {
-      timeEl.textContent = '—';
-      timeEl.classList.remove('text-emerald-400');
-      timeEl.classList.add('text-neutral-500');
-    }
-  }
+  setValueAndColor(timeEl, {
+    online,
+    power,
+    value: formattedTime,
+    suffix: ''
+  });
 }
 
 function updateFireplaceCard(card, device) {
@@ -166,6 +196,8 @@ function updateDeviceCard(card, device) {
   const onlineText = card.querySelector('[data-online-text]');
   if (onlineText) {
     onlineText.textContent = online ? 'онлайн' : 'оффлайн';
+    onlineText.classList.remove('text-neutral-400', 'text-neutral-600');
+    onlineText.classList.add(online ? 'text-neutral-400' : 'text-neutral-600');
   }
 
   card.querySelectorAll('[data-online-wrapper]').forEach((wrapper) => {
@@ -215,7 +247,7 @@ function updateDeviceCard(card, device) {
   });
 
   if (kind === 'dryer') {
-    updateDryerCard(card, device, { power });
+    updateDryerCard(card, device, { power, online });
   } else if (kind === 'fireplace') {
     updateFireplaceCard(card, device);
   }
@@ -367,13 +399,29 @@ function initDeviceCards(root = document) {
         if (btn.disabled) return;
         const prev = btn.getAttribute('aria-pressed') === 'true';
         const next = !prev;
+
+        // Мгновенно обновляем кнопку и индикаторы цвета/значения
         btn.setAttribute('aria-pressed', String(next));
+        const svg = btn.querySelector('svg');
+        if (svg) {
+          svg.classList.remove('text-emerald-400', 'text-neutral-400');
+          svg.classList.add(next ? 'text-emerald-400' : 'text-neutral-400');
+        }
+
+        // Предполагаем online=true раз кнопка доступна; берём текущие показания из DOM
+        const { temp_c, time_left } = getDisplayedMetrics(card);
+        updateDryerCard(card, { temp_c, time_left, state: {} }, { power: next, online: true });
+
         try {
           await api.power(id, next);
-          btn.querySelector('svg')?.classList.toggle('text-emerald-400', next);
-          btn.querySelector('svg')?.classList.toggle('text-neutral-400', !next);
         } catch (e) {
+          // Откат визуально при ошибке
           btn.setAttribute('aria-pressed', String(prev));
+          if (svg) {
+            svg.classList.remove('text-emerald-400', 'text-neutral-400');
+            svg.classList.add(prev ? 'text-emerald-400' : 'text-neutral-400');
+          }
+          updateDryerCard(card, { temp_c, time_left, state: {} }, { power: prev, online: true });
           alert('Не удалось переключить питание');
         }
       });
