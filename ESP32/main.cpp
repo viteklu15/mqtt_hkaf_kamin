@@ -35,6 +35,9 @@ char TOPIC_PAIR_INDEX[128];   // РЕТЕЙН-индекс: pair/index/<CODE> ->
 // ----------- Состояние устройства -----------
 bool onState = false;
 String programState = "one"; // one|two|three|four|five|six
+bool soundEnabled = false;
+float currentTempC = 0.0f;
+uint32_t timeLeftSeconds = 0;
 
 // Привязка
 Preferences prefs;
@@ -109,6 +112,9 @@ void publishState() {
   StaticJsonDocument<256> doc;
   doc["on"] = onState;
   doc["program"] = programState;
+  doc["sound"] = soundEnabled;
+  doc["temp_c"] = currentTempC;
+  doc["time_left"] = timeLeftSeconds;
   doc["paired"] = isPaired;
   doc["pair_required"] = !isPaired;
   doc["ts"] = (uint32_t)(millis() / 1000);
@@ -187,6 +193,16 @@ void applyCommandJson(const char* payload, size_t len) {
       programState = p;
       // TODO: применить логику программы
       Serial.printf("Applied program=%s\n", programState.c_str());
+      changed = true;
+    }
+  }
+
+  if (doc.containsKey("sound")) {
+    bool v = doc["sound"];
+    if (soundEnabled != v) {
+      soundEnabled = v;
+      // TODO: переключить звуковую индикацию
+      Serial.printf("Applied sound=%s\n", soundEnabled ? "true" : "false");
       changed = true;
     }
   }
