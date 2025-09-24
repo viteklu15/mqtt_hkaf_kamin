@@ -4,9 +4,10 @@
 {% macro fireplace_card(id, title, online=True, power=False,
 mode_options=[], mode_value=None,
 sound_options=[], sound_value=None,
-backlight=False) %}
-<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col" 
-     data-device-id="{{ id }}" data-device-kind="fireplace">
+backlight=False,
+serial=None) %}
+<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col"
+     data-device-id="{{ id }}" data-device-kind="fireplace" data-device-serial="{{ serial or '' }}">
 
     <!-- Заголовок -->
     <div class="flex items-center justify-between">
@@ -14,7 +15,7 @@ backlight=False) %}
             <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"
                 data-online-indicator></div>
             <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
-            <span class="text-xs text-neutral-400" data-online-text>{{ 'онлайн' if online else 'оффлайн' }}</span>
+            <span class="text-xs text-neutral-400" data-online-text>{{ ('онлайн' if online else 'оффлайн') ~ (serial and (' · SN:' ~ serial) or '') }}</span>
         </div>
         <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -116,7 +117,8 @@ backlight=False) %}
 program_value=None,
 sound=False,
 temp_c=None,
-time_left=None) %}
+time_left=None,
+serial=None) %}
 
 {% set program_options = [
     ('1', 'Стандартный'),
@@ -127,8 +129,8 @@ time_left=None) %}
     ('6', 'Легкая глажка')
 ] %}
 
-<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col" 
-     data-device-id="{{ id }}" data-device-kind="dryer">
+<div class="mt-6 p-6 rounded-3xl glass border border-white/10 shadow-xl h-full flex flex-col"
+     data-device-id="{{ id }}" data-device-kind="dryer" data-device-serial="{{ serial or '' }}">
 
     <!-- Заголовок -->
     <div class="flex items-center justify-between">
@@ -136,7 +138,7 @@ time_left=None) %}
             <div class="h-2.5 w-2.5 rounded-full {{ 'bg-emerald-400' if online else 'bg-red-500' }}"
                 data-online-indicator></div>
             <div class="text-lg font-semibold" data-device-title>{{ title }}</div>
-            <span class="text-xs text-neutral-400" data-online-text>{{ 'онлайн' if online else 'оффлайн' }}</span>
+            <span class="text-xs text-neutral-400" data-online-text>{{ ('онлайн' if online else 'оффлайн') ~ (serial and (' · SN:' ~ serial) or '') }}</span>
         </div>
         <button type="button" class="p-2 rounded-lg hover:bg-white/10" data-open-settings aria-label="Настройки">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">

@@ -44,6 +44,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             device_id TEXT NOT NULL UNIQUE,
+            serial TEXT DEFAULT NULL,
             name TEXT NOT NULL,
             kind TEXT NOT NULL DEFAULT 'dryer',
             on_state INTEGER DEFAULT 0,
@@ -61,6 +62,8 @@ def init_db():
             con.execute("ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'dryer'")
         if "state_json" not in cols:
             con.execute("ALTER TABLE devices ADD COLUMN state_json TEXT DEFAULT NULL")
+        if "serial" not in cols:
+            con.execute("ALTER TABLE devices ADD COLUMN serial TEXT DEFAULT NULL")
 init_db()
 
 # ---------- Текущий пользователь ----------
@@ -142,7 +145,7 @@ def _bool_from_payload(value, default=False):
 def fetch_user_devices(user_id: int):
     with db() as con:
         rows = con.execute("""
-            SELECT device_id, name, kind, on_state, program, state_json, last_seen, created_at
+            SELECT device_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (user_id,)).fetchall()
 
@@ -165,6 +168,7 @@ def fetch_user_devices(user_id: int):
             "state": state_payload,
             "last_seen": row["last_seen"],
             "created_at": row["created_at"],
+            "serial": row["serial"],
         }
 
         if kind == "fireplace":
@@ -247,6 +251,7 @@ def _build_device_api_payload(row):
         "last_seen": row["last_seen"],
         "created_at": row["created_at"],
         "state": state_payload,
+        "serial": row["serial"],
     }
 
     if kind == "fireplace":
@@ -336,7 +341,7 @@ def _load_device_payload_for_user(con, device_id: str, user_id: int):
         return None
     row = con.execute(
         """
-        SELECT device_id, user_id, name, kind, on_state, program, state_json, last_seen, created_at
+        SELECT device_id, user_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
         FROM devices WHERE device_id=?
         """,
         (device_id,),
@@ -504,7 +509,7 @@ def account_delete():
 def api_devices_list():
     with db() as con:
         rows = con.execute("""
-            SELECT device_id, name, kind, on_state, program, state_json, last_seen, created_at
+            SELECT device_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
             FROM devices WHERE user_id=? ORDER BY created_at DESC
         """, (g.user["id"],)).fetchall()
     devices = [_build_device_api_payload(r) for r in rows]
@@ -546,6 +551,7 @@ def api_devices_stream():
 def api_devices_pair():
     data = request.get_json(silent=True) or {}
     code = (data.get("code") or "").strip()
+    serial = (data.get("serial") or "").strip().upper() or None
     if not code:
         return jsonify(ok=False, message="Не указан код"), 400
 
@@ -561,21 +567,28 @@ def api_devices_pair():
         exists = con.execute("SELECT 1 FROM devices WHERE device_id=?", (device_id,)).fetchone()
         if not exists:
             con.execute("""
-                INSERT INTO devices (user_id, device_id, name, kind, on_state, program, last_seen, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO devices (user_id, device_id, name, kind, serial, on_state, program, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 g.user["id"],
                 device_id,
                 "Сушильный шкаф",
                 "dryer",
+                serial,
                 0,
                 "standard",
                 None,
                 datetime.utcnow().isoformat()
             ))
         else:
-            con.execute("UPDATE devices SET user_id=?, kind=?, name=?, program=? WHERE device_id=?",
-                        (g.user["id"], "dryer", "Сушильный шкаф", "standard", device_id))
+            update_fields = ["user_id=?", "kind=?", "name=?", "program=?"]
+            values = [g.user["id"], "dryer", "Сушильный шкаф", "standard"]
+            if serial:
+                update_fields.append("serial=?")
+                values.append(serial)
+            values.append(device_id)
+            sql = f"UPDATE devices SET {', '.join(update_fields)} WHERE device_id=?"
+            con.execute(sql, tuple(values))
 
     return jsonify(ok=True, device_id=device_id, name="Сушильный шкаф")
 
@@ -638,17 +651,27 @@ def api_devices_manual_add():
 
         try:
             con.execute("""
-                INSERT INTO devices (user_id, device_id, name, kind, on_state, program, last_seen, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO devices (user_id, device_id, name, kind, serial, on_state, program, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                g.user["id"], device_id, device_name, kind, 0, program_default, None, datetime.utcnow().isoformat()
+                g.user["id"],
+                device_id,
+                device_name,
+                kind,
+                serial,
+                0,
+                program_default,
+                None,
+                datetime.utcnow().isoformat()
             ))
         except sqlite3.IntegrityError:
             # На случай гонки добавления — обновляем владельца и параметры
-            con.execute("UPDATE devices SET user_id=?, kind=?, name=?, program=? WHERE device_id=?",
-                        (g.user["id"], kind, device_name, program_default, device_id))
+            con.execute(
+                "UPDATE devices SET user_id=?, kind=?, name=?, program=?, serial=? WHERE device_id=?",
+                (g.user["id"], kind, device_name, program_default, serial, device_id),
+            )
 
-    return jsonify(ok=True, device_id=device_id, kind=kind, name=device_name)
+    return jsonify(ok=True, device_id=device_id, kind=kind, name=device_name, serial=serial)
 
 def _get_user_device(device_id: str):
     if not g.user:
