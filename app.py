@@ -11,7 +11,7 @@ from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
 APP_SECRET = os.environ.get("APP_SECRET", "dev_secret_change_me")
 DB_PATH = "sf.db"
 
-YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc80050327f6ca5aac")
+YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc8005032f76ca5aac")
 YANDEX_CLIENT_SECRET = os.environ.get("YANDEX_CLIENT_SECRET", "82f16ceb5eb4095bf456a523febedb9")
 YANDEX_LINK_URL = os.environ.get(
     "YANDEX_LINK_URL",
