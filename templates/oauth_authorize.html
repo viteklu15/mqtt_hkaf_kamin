@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Авторизация — Schönes Feuer</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='fire-32.png') }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="{{ url_for('static', filename='fire-16.png') }}">
+    <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="min-h-screen bg-neutral-950 text-neutral-100 flex items-center justify-center p-4">
+    <div class="w-full max-w-md glass border border-white/10 rounded-3xl p-6 shadow-2xl">
+        <div class="flex items-center gap-3">
+            <img src="{{ url_for('static', filename='icon.svg') }}" alt="" class="w-10 h-10">
+            <div>
+                <h1 class="text-xl font-semibold">Связать с Яндекс.Алисой</h1>
+                <p class="text-sm text-neutral-400">Приложение Schönes Feuer запрашивает доступ к вашему аккаунту.</p>
+            </div>
+        </div>
+        <div class="mt-4 text-sm text-neutral-300">
+            <p>Аккаунт: <span class="font-semibold">{{ user.email }}</span></p>
+            {% if scope %}
+            <p class="mt-2">Запрашиваемые права: <code class="text-xs bg-white/5 px-2 py-1 rounded-lg">{{ scope }}</code></p>
+            {% endif %}
+        </div>
+        <form method="post" class="mt-6 space-y-4">
+            <input type="hidden" name="client_id" value="{{ client_id }}">
+            <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+            {% if state %}<input type="hidden" name="state" value="{{ state }}">{% endif %}
+            {% if external_id %}<input type="hidden" name="external_id" value="{{ external_id }}">{% endif %}
+            <div class="space-y-3">
+                <button type="submit" name="decision" value="approve"
+                    class="w-full px-4 py-2 rounded-xl bg-emerald-500/90 text-neutral-900 font-semibold hover:brightness-110">
+                    Разрешить доступ
+                </button>
+                <button type="submit" name="decision" value="deny"
+                    class="w-full px-4 py-2 rounded-xl border border-white/15 hover:border-white/30">
+                    Отменить
+                </button>
+            </div>
+        </form>
+        <p class="mt-4 text-xs text-neutral-500">
+            После подтверждения вы будете перенаправлены на страницу Яндекса для завершения привязки.
+        </p>
+    </div>
+</body>
+</html>
