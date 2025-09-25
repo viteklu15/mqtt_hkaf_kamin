@@ -32,7 +32,9 @@ DEVICE_EVENT_LOCK = threading.Lock()
 SSE_PING_INTERVAL = 15
 
 
-FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 5)]
+# Доступные режимы камина: устройства поддерживают шесть предустановок,
+# поэтому генерируем список строковых значений от 1 до 6 для отображения в UI.
+FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 7)]
 FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
 
 
