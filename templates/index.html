@@ -175,8 +175,12 @@
             <div class="p-4 h-full flex flex-col">
                 <div class="font-bold">УМНЫЙ ДОМ</div>
                 <nav class="mt-6 text-sm space-y-1">
-                    <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
-                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
+                    <button type="button"
+                        class="nav-tab px-3 py-2 rounded-lg tab-active"
+                        data-tab-target="devices">Устройства</button>
+                    <button type="button"
+                        class="nav-tab px-3 py-2 rounded-lg"
+                        data-tab-target="yandex">Яндекс.Алиса</button>
                     <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
                 </nav>
                 <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
@@ -189,8 +193,12 @@
             <div class="p-4 h-full flex flex-col">
                 <div class="font-bold">УМНЫЙ ДОМ</div>
                 <nav class="mt-6 text-sm space-y-1">
-                    <div class="px-3 py-2 rounded-lg bg-white/5">Устройства</div>
-                    <div class="px-3 py-2 rounded-lg hover:bg-white/5">Яндекс.Алиса</div>
+                    <button type="button"
+                        class="nav-tab px-3 py-2 rounded-lg tab-active"
+                        data-tab-target="devices">Устройства</button>
+                    <button type="button"
+                        class="nav-tab px-3 py-2 rounded-lg"
+                        data-tab-target="yandex">Яндекс.Алиса</button>
                     <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
                 </nav>
                 <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
@@ -199,7 +207,7 @@
 
         <!-- ОСНОВНОЙ КОНТЕНТ -->
         <main class="flex-1">
-            <section id="devices" class="p-4 sm:p-6 lg:p-8">
+            <section id="devices" class="p-4 sm:p-6 lg:p-8" data-tab-section="devices">
                 <h2 class="text-2xl font-bold">Устройства</h2>
                 <!-- <p class="mt-2 text-neutral-400">Нет подключённых устройств.</p> -->
                 <button id="addDeviceBtn"
@@ -242,7 +250,7 @@
                 <p class="mt-6 text-neutral-400">Нет подключённых устройств.</p>
                 {% endif %}
             </section>
-            <section id="yandex" class="p-4 sm:p-6 lg:p-8 pt-0">
+            <section id="yandex" class="p-4 sm:p-6 lg:p-8 pt-0 hidden" data-tab-section="yandex">
                 <div class="mt-2 glass rounded-3xl border border-white/10 p-6">
                     <div class="flex flex-col gap-4">
                         <div>
@@ -459,6 +467,41 @@
             document.addEventListener("keydown", (e) => {
                 if (e.key === "Escape") closeDrawer();
             });
+
+            const tabButtons = Array.from(document.querySelectorAll('[data-tab-target]'));
+            const tabSections = Array.from(document.querySelectorAll('[data-tab-section]'));
+
+            function setActiveTab(target) {
+                let matched = false;
+                tabButtons.forEach((btn) => {
+                    const isActive = btn.dataset.tabTarget === target;
+                    if (isActive) matched = true;
+                    btn.classList.toggle("tab-active", isActive);
+                    btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+                });
+                tabSections.forEach((section) => {
+                    const isVisible = section.dataset.tabSection === target;
+                    section.classList.toggle("hidden", !isVisible);
+                });
+                return matched;
+            }
+
+            if (tabButtons.length && tabSections.length) {
+                const defaultTarget = tabButtons.find((btn) => btn.classList.contains("tab-active"))?.dataset.tabTarget
+                    || tabButtons[0].dataset.tabTarget;
+                setActiveTab(defaultTarget);
+
+                tabButtons.forEach((btn) => {
+                    btn.addEventListener("click", () => {
+                        const target = btn.dataset.tabTarget;
+                        if (!target) return;
+                        setActiveTab(target);
+                        if (drawer && !drawer.classList.contains("-translate-x-full")) {
+                            closeDrawer();
+                        }
+                    });
+                });
+            }
 
             const mql = window.matchMedia("(min-width: 768px)");
             if (mql.matches) closeDrawer();
