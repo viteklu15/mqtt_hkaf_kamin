@@ -23,7 +23,6 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
-YA_OFFLINE_GRACE_SECONDS = int(os.environ.get("YA_OFFLINE_GRACE_SECONDS", 120))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -136,21 +135,10 @@ def _load_oauth_code(code: str):
     return dict(row)
 
 
-def _create_or_update_yandex_tokens(
-    user_id: int,
-    client_id: str,
-    scope=None,
-    refresh_token=None,
-    external_id=None,
-    *,
-    rotate_refresh: bool = True,
-):
+def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
+                                    external_id=None):
     access_token = _generate_token(32)
-    refresh_to_store = (
-        _generate_token(32)
-        if rotate_refresh or not refresh_token
-        else refresh_token
-    )
+    new_refresh_token = _generate_token(32)
     access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
     refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
     with db() as con:
@@ -167,7 +155,7 @@ def _create_or_update_yandex_tokens(
                 " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
                 (
                     access_token,
-                    refresh_to_store,
+                    new_refresh_token,
                     scope,
                     external_id,
                     access_exp,
@@ -184,7 +172,7 @@ def _create_or_update_yandex_tokens(
                     user_id,
                     client_id,
                     access_token,
-                    refresh_to_store,
+                    new_refresh_token,
                     scope,
                     external_id,
                     access_exp,
@@ -193,7 +181,7 @@ def _create_or_update_yandex_tokens(
                     _now_iso(),
                 ),
             )
-    return access_token, refresh_to_store, access_exp
+    return access_token, new_refresh_token, access_exp
 
 
 def _get_user_id_from_bearer(auth_header: str):
@@ -246,7 +234,7 @@ def _append_query(url: str, params: dict) -> str:
 def _fetch_yandex_devices(user_id: int):
     with db() as con:
         rows = con.execute(
-            "SELECT device_id, name, kind, on_state, program, state_json, last_seen FROM devices WHERE user_id=?",
+            "SELECT device_id, name, kind, on_state, program, state_json FROM devices WHERE user_id=?",
             (user_id,),
         ).fetchall()
 
@@ -269,7 +257,7 @@ def _fetch_yandex_devices(user_id: int):
         devices.append({
             "id": row["device_id"],
             "name": row["name"] or "Сушильный шкаф",
-            "online": _is_device_online(row["device_id"], row["last_seen"]),
+            "online": bool(ONLINE.get(row["device_id"])),
             "power": power_state,
             "program": program_device_value,
         })
@@ -367,22 +355,6 @@ def _parse_iso(dt: str):
     except ValueError:
         return None
 
-
-def _is_device_online(device_id: str, last_seen):
-    if ONLINE.get(device_id):
-        return True
-    if isinstance(last_seen, datetime):
-        last_seen_dt = last_seen
-    else:
-        last_seen_dt = _parse_iso(last_seen) if last_seen else None
-    if not last_seen_dt:
-        return False
-    try:
-        delta = _now_utc() - last_seen_dt
-    except TypeError:
-        return False
-    return delta.total_seconds() <= YA_OFFLINE_GRACE_SECONDS
-
 # ---------- Текущий пользователь ----------
 def current_user():
     uid = session.get("uid")
@@ -476,13 +448,11 @@ def fetch_user_devices(user_id: int):
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
-        online_status = _is_device_online(device_id, row["last_seen"])
-
         base = {
             "id": device_id,
             "kind": kind,
             "title": row["name"] or ("Камин" if kind == "fireplace" else "Сушильный шкаф"),
-            "online": online_status,
+            "online": bool(ONLINE.get(device_id)),
             "power": power_state,
             "state": state_payload,
             "last_seen": row["last_seen"],
@@ -564,7 +534,7 @@ def _build_device_api_payload(row):
         "device_id": dev_id,
         "name": row["name"],
         "kind": kind,
-        "online": _is_device_online(dev_id, row["last_seen"]),
+        "online": bool(ONLINE.get(dev_id)),
         "on": power_state,
         "program": row["program"],
         "last_seen": row["last_seen"],
@@ -603,7 +573,7 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
     owner_id = None
 
     if device_id:
-        online = _is_device_online(device_id, None)
+        online = bool(ONLINE.get(device_id))
 
         close_conn = False
         if con is None:
@@ -611,12 +581,11 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
             close_conn = True
         try:
             row = con.execute(
-                "SELECT user_id, last_seen FROM devices WHERE device_id=?",
+                "SELECT user_id FROM devices WHERE device_id=?",
                 (device_id,)
             ).fetchone()
             if row:
                 owner_id = row["user_id"]
-                online = _is_device_online(device_id, row["last_seen"])
         finally:
             if close_conn:
                 con.close()
@@ -874,19 +843,15 @@ def oauth_token():
         refresh_exp = _parse_iso(row["refresh_expires_at"])
         if refresh_exp and refresh_exp < _now_utc():
             return jsonify(error="invalid_grant"), 400
-        access_token, effective_refresh_token, _ = _create_or_update_yandex_tokens(
-            row["user_id"],
-            client_id,
-            row["scope"],
-            refresh_token=refresh_token,
+        access_token, new_refresh_token, _ = _create_or_update_yandex_tokens(
+            row["user_id"], client_id, row["scope"], refresh_token=refresh_token,
             external_id=row["external_account_id"],
-            rotate_refresh=False,
         )
         return jsonify(
             access_token=access_token,
             token_type="bearer",
             expires_in=YANDEX_TOKEN_TTL,
-            refresh_token=effective_refresh_token,
+            refresh_token=new_refresh_token,
             scope=row["scope"] or "",
         )
 
@@ -898,36 +863,10 @@ def _yandex_unauthorized():
 
 
 def _yandex_response(request_id, payload, status=200):
-    response = jsonify({
+    return jsonify({
         "request_id": request_id or "",
         "payload": payload,
-    })
-    response.headers["X-Request-Id"] = request_id or ""
-    return response, status
-
-
-def _yandex_simple_response(request_id, status=200):
-    response = jsonify({"request_id": request_id or ""})
-    response.headers["X-Request-Id"] = request_id or ""
-    return response, status
-
-
-def _extract_request_id(body=None):
-    header_request_id = request.headers.get("X-Request-Id")
-    if header_request_id:
-        return header_request_id
-    if isinstance(body, dict):
-        return body.get("request_id") or body.get("requestId")
-    return None
-
-
-@app.route("/yandex/v1.0/", methods=["HEAD"])
-@app.route("/v1.0/", methods=["HEAD"])
-def yandex_ping():
-    request_id = request.headers.get("X-Request-Id") or ""
-    response = Response(status=200)
-    response.headers["X-Request-Id"] = request_id
-    return response
+    }), status
 
 
 @app.route("/yandex/v1.0/user/devices", methods=["POST"])
@@ -938,7 +877,7 @@ def yandex_devices():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    request_id = _extract_request_id(body)
+    request_id = body.get("request_id") or body.get("requestId")
 
     devices = []
     for device in _fetch_yandex_devices(user_id):
@@ -979,8 +918,9 @@ def yandex_devices_query():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    request_id = _extract_request_id(body)
-    app.logger.info("[YA QUERY] request_id=%s body=%r", request_id, body)
+    app.logger.info("[YA QUERY] request: %r", body)
+
+    request_id = body.get("request_id") or body.get("requestId")
     # ВАЖНО: поддерживаем оба варианта — с payload и без
     requested_devices = (body.get("payload", {}).get("devices")
                          or body.get("devices")
@@ -1016,7 +956,7 @@ def yandex_devices_query():
         })
 
     resp_payload = {"devices": results}
-    app.logger.info("[YA QUERY] request_id=%s response=%r", request_id, resp_payload)
+    app.logger.info("[YA QUERY] response: %r", resp_payload)
     return _yandex_response(request_id, resp_payload)
 
 
@@ -1031,8 +971,7 @@ def yandex_devices_action():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    request_id = _extract_request_id(body)
-    app.logger.info("[YA ACTION] request_id=%s body=%r", request_id, body)
+    request_id = body.get("request_id") or body.get("requestId")
     payload_devices = body.get("payload", {}).get("devices") or []
 
     devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
@@ -1182,9 +1121,7 @@ def yandex_devices_action():
 
         results.append(device_result)
 
-    response_payload = {"devices": results}
-    app.logger.info("[YA ACTION] request_id=%s response=%r", request_id, response_payload)
-    return _yandex_response(request_id, response_payload)
+    return _yandex_response(request_id, {"devices": results})
 
 
 @app.post("/yandex/v1.0/user/unlink")
@@ -1205,9 +1142,8 @@ def yandex_unlink():
     with db() as con:
         con.execute("DELETE FROM yandex_tokens WHERE user_id=?", (user_id,))
 
-    request_id = _extract_request_id(body)
-    app.logger.info("[YA UNLINK] request_id=%s body=%r", request_id, body)
-    return _yandex_simple_response(request_id)
+    request_id = body.get("request_id") or body.get("requestId")
+    return _yandex_response(request_id, {"status": "OK"})
 
 
 @app.post("/yandex/unlink_all")
