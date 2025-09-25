@@ -802,7 +802,8 @@ def _yandex_response(request_id, payload, status=200):
     }), status
 
 
-@app.post("/yandex/v1.0/user/devices")
+@app.route("/yandex/v1.0/user/devices", methods=["POST"])
+@app.route("/v1.0/user/devices", methods=["POST", "GET"])
 def yandex_devices():
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
@@ -833,7 +834,8 @@ def yandex_devices():
     return _yandex_response(request_id, payload)
 
 
-@app.post("/yandex/v1.0/user/devices/query")
+@app.route("/yandex/v1.0/user/devices/query", methods=["POST"])
+@app.route("/v1.0/user/devices/query", methods=["POST"])
 def yandex_devices_query():
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
@@ -873,7 +875,8 @@ def yandex_devices_query():
     return _yandex_response(request_id, {"devices": results})
 
 
-@app.post("/yandex/v1.0/user/devices/action")
+@app.route("/yandex/v1.0/user/devices/action", methods=["POST"])
+@app.route("/v1.0/user/devices/action", methods=["POST"])
 def yandex_devices_action():
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
