@@ -1,14 +1,27 @@
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
-import sqlite3, os, json, queue, threading
-from datetime import datetime
+import sqlite3, os, json, queue, threading, secrets, base64
+from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
+from urllib.parse import urlencode
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
 
 APP_SECRET = os.environ.get("APP_SECRET", "dev_secret_change_me")
 DB_PATH = "sf.db"
+
+YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc80050327f6ca5aac")
+YANDEX_CLIENT_SECRET = os.environ.get("YANDEX_CLIENT_SECRET", "82f16ceb5eb4095bf456a523febedb9")
+YANDEX_LINK_URL = os.environ.get(
+    "YANDEX_LINK_URL",
+    "https://yandex.ru/iot/iot/linking/7c169e54-a714-4398-9cf2-87f2bb868341/"
+    "?app_build_number=unknown&app_id=unknown&app_platform=unknown&app_version=unknown&app_version_name=unknown"
+    "&dp=2&lang=ru-RU&manufacturer=unknown&model=unknown&os_version=unknown&size=1080%2C1920&uuid=unknown"
+)
+
+YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
+YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -21,6 +34,167 @@ SSE_PING_INTERVAL = 15
 
 FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 5)]
 FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
+
+
+def _generate_token(length: int = 32) -> str:
+    return secrets.token_urlsafe(length)
+
+
+def _cleanup_expired_codes(con):
+    now = _now_iso()
+    con.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
+
+
+def _store_oauth_code(user_id: int, client_id: str, redirect_uri: str, scope=None, state=None):
+    code = _generate_token(24)
+    expires_at = (_now_utc() + timedelta(minutes=5)).isoformat()
+    with db() as con:
+        _cleanup_expired_codes(con)
+        con.execute(
+            "INSERT INTO oauth_codes (code, user_id, client_id, redirect_uri, scope, state, expires_at, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, user_id, client_id, redirect_uri, scope, state, expires_at, _now_iso()),
+        )
+    return code, expires_at
+
+
+def _load_oauth_code(code: str):
+    if not code:
+        return None
+    with db() as con:
+        _cleanup_expired_codes(con)
+        row = con.execute(
+            "SELECT code, user_id, client_id, redirect_uri, scope, state, expires_at FROM oauth_codes WHERE code=?",
+            (code,),
+        ).fetchone()
+        if not row:
+            return None
+        con.execute("DELETE FROM oauth_codes WHERE code=?", (code,))
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None
+    return dict(row)
+
+
+def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
+                                    external_id=None):
+    access_token = _generate_token(32)
+    new_refresh_token = _generate_token(32)
+    access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
+    refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
+    with db() as con:
+        if refresh_token:
+            row = con.execute(
+                "SELECT id FROM yandex_tokens WHERE refresh_token=? AND user_id=?",
+                (refresh_token, user_id),
+            ).fetchone()
+        else:
+            row = None
+        if row:
+            con.execute(
+                "UPDATE yandex_tokens SET access_token=?, refresh_token=?, scope=?, external_account_id=?,"
+                " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
+                (
+                    access_token,
+                    new_refresh_token,
+                    scope,
+                    external_id,
+                    access_exp,
+                    refresh_exp,
+                    _now_iso(),
+                    row["id"],
+                ),
+            )
+        else:
+            con.execute(
+                "INSERT INTO yandex_tokens (user_id, client_id, access_token, refresh_token, scope, external_account_id,"
+                " expires_at, refresh_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    client_id,
+                    access_token,
+                    new_refresh_token,
+                    scope,
+                    external_id,
+                    access_exp,
+                    refresh_exp,
+                    _now_iso(),
+                    _now_iso(),
+                ),
+            )
+    return access_token, new_refresh_token, access_exp
+
+
+def _get_user_id_from_bearer(auth_header: str):
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        return None, None
+    token = auth_header.split(None, 1)[1].strip()
+    if not token:
+        return None, None
+    with db() as con:
+        row = con.execute(
+            "SELECT id, user_id, expires_at, refresh_expires_at FROM yandex_tokens WHERE access_token=?",
+            (token,),
+        ).fetchone()
+    if not row:
+        return None, None
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None, None
+    refresh_exp = _parse_iso(row["refresh_expires_at"])
+    if refresh_exp and refresh_exp < _now_utc():
+        return None, None
+    return row["user_id"], row["id"]
+
+
+def _count_yandex_links(user_id: int) -> int:
+    with db() as con:
+        row = con.execute(
+            "SELECT COUNT(*) AS cnt FROM yandex_tokens WHERE user_id=? AND refresh_expires_at>?",
+            (user_id, _now_iso()),
+        ).fetchone()
+    return int(row["cnt"] if row else 0)
+
+
+def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
+    if client_id != YANDEX_CLIENT_ID:
+        return False
+    if client_secret is not None and client_secret != YANDEX_CLIENT_SECRET:
+        return False
+    return True
+
+
+def _append_query(url: str, params: dict) -> str:
+    params = {k: v for k, v in params.items() if v is not None}
+    if not params:
+        return url
+    separator = '&' if '?' in url else '?'
+    return f"{url}{separator}{urlencode(params)}"
+
+
+def _fetch_yandex_devices(user_id: int):
+    with db() as con:
+        rows = con.execute(
+            "SELECT device_id, name, kind, on_state, state_json FROM devices WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+
+    devices = []
+    for row in rows:
+        kind = (row["kind"] or "dryer").lower()
+        if kind != "dryer":
+            continue
+        state_payload = _load_state_payload(row["state_json"])
+        power_state = bool(row["on_state"])
+        if "on" in state_payload:
+            power_state = _bool_from_payload(state_payload.get("on"), power_state)
+        devices.append({
+            "id": row["device_id"],
+            "name": row["name"] or "Сушильный шкаф",
+            "online": bool(ONLINE.get(row["device_id"])),
+            "power": power_state,
+        })
+    return devices
 
 # ---------- БД ----------
 def db():
@@ -64,7 +238,55 @@ def init_db():
             con.execute("ALTER TABLE devices ADD COLUMN state_json TEXT DEFAULT NULL")
         if "serial" not in cols:
             con.execute("ALTER TABLE devices ADD COLUMN serial TEXT DEFAULT NULL")
+
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS oauth_codes (
+            code TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            client_id TEXT NOT NULL,
+            redirect_uri TEXT NOT NULL,
+            scope TEXT DEFAULT NULL,
+            state TEXT DEFAULT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
+
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS yandex_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            client_id TEXT NOT NULL,
+            access_token TEXT NOT NULL UNIQUE,
+            refresh_token TEXT NOT NULL UNIQUE,
+            scope TEXT DEFAULT NULL,
+            external_account_id TEXT DEFAULT NULL,
+            expires_at TEXT NOT NULL,
+            refresh_expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
 init_db()
+
+
+def _now_utc():
+    return datetime.utcnow()
+
+
+def _now_iso():
+    return _now_utc().isoformat()
+
+
+def _parse_iso(dt: str):
+    if not dt:
+        return None
+    try:
+        return datetime.fromisoformat(dt)
+    except ValueError:
+        return None
 
 # ---------- Текущий пользователь ----------
 def current_user():
@@ -398,17 +620,359 @@ def _state_to_db(device_id: str, kind: str, payload):
 
 register_state_handler(_state_to_db)
 
+# ---------- OAuth 2.0 для Яндекс.Алисы ----------
+@app.route("/oauth/authorize", methods=["GET", "POST"])
+def oauth_authorize():
+    response_type = request.values.get("response_type", "code").lower()
+    client_id = request.values.get("client_id", "")
+    redirect_uri = request.values.get("redirect_uri", "")
+    scope = request.values.get("scope")
+    state = request.values.get("state")
+    external_id = request.values.get("yandexuid") or request.values.get("external_user_id")
+
+    if response_type != "code":
+        return jsonify(error="unsupported_response_type"), 400
+    if not redirect_uri:
+        return jsonify(error="invalid_request", error_description="redirect_uri_required"), 400
+    if not _validate_yandex_client(client_id):
+        return jsonify(error="unauthorized_client"), 401
+
+    if not g.user:
+        next_url = request.full_path.rstrip("?") if request.query_string else request.path
+        if not next_url.startswith("/"):
+            next_url = "/"
+        session["post_login_redirect"] = next_url
+        return redirect(url_for("index") + "#login")
+
+    if request.method == "POST":
+        decision = request.form.get("decision")
+        if decision == "approve":
+            code, _ = _store_oauth_code(g.user["id"], client_id, redirect_uri, scope, external_id or state)
+            session.pop("post_login_redirect", None)
+            return redirect(_append_query(redirect_uri, {"code": code, "state": state}))
+        else:
+            return redirect(_append_query(redirect_uri, {"error": "access_denied", "state": state}))
+
+    return render_template(
+        "oauth_authorize.html",
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        scope=scope,
+        state=state,
+        external_id=external_id,
+        user=g.user,
+    )
+
+
+def _extract_basic_credentials(auth_header: str):
+    if not auth_header or not auth_header.lower().startswith("basic "):
+        return None, None
+    try:
+        decoded = base64.b64decode(auth_header.split(None, 1)[1]).decode("utf-8")
+    except Exception:
+        return None, None
+    if ":" not in decoded:
+        return None, None
+    client_id, client_secret = decoded.split(":", 1)
+    return client_id, client_secret
+
+
+@app.post("/oauth/token")
+def oauth_token():
+    if request.mimetype == "application/json":
+        data = request.get_json(silent=True) or {}
+    else:
+        data = request.form.to_dict() or {}
+
+    header_client_id, header_client_secret = _extract_basic_credentials(request.headers.get("Authorization"))
+    client_id = header_client_id or data.get("client_id", "")
+    client_secret = header_client_secret or data.get("client_secret")
+
+    if not _validate_yandex_client(client_id, client_secret):
+        return jsonify(error="invalid_client"), 401
+
+    grant_type = (data.get("grant_type") or "").lower()
+    if grant_type == "authorization_code":
+        code = data.get("code")
+        if not code:
+            return jsonify(error="invalid_request", error_description="code_required"), 400
+        code_payload = _load_oauth_code(code)
+        if not code_payload or code_payload.get("client_id") != client_id:
+            return jsonify(error="invalid_grant"), 400
+        user_id = code_payload["user_id"]
+        scope = code_payload.get("scope")
+        external_id = code_payload.get("state")
+        access_token, refresh_token, _ = _create_or_update_yandex_tokens(
+            user_id, client_id, scope, external_id=external_id
+        )
+        return jsonify(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=YANDEX_TOKEN_TTL,
+            refresh_token=refresh_token,
+            scope=scope or "",
+        )
+
+    if grant_type == "refresh_token":
+        refresh_token = data.get("refresh_token")
+        if not refresh_token:
+            return jsonify(error="invalid_request", error_description="refresh_token_required"), 400
+        with db() as con:
+            row = con.execute(
+                "SELECT user_id, scope, external_account_id, refresh_expires_at FROM yandex_tokens"
+                " WHERE refresh_token=? AND client_id=?",
+                (refresh_token, client_id),
+            ).fetchone()
+        if not row:
+            return jsonify(error="invalid_grant"), 400
+        refresh_exp = _parse_iso(row["refresh_expires_at"])
+        if refresh_exp and refresh_exp < _now_utc():
+            return jsonify(error="invalid_grant"), 400
+        access_token, new_refresh_token, _ = _create_or_update_yandex_tokens(
+            row["user_id"], client_id, row["scope"], refresh_token=refresh_token,
+            external_id=row["external_account_id"],
+        )
+        return jsonify(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=YANDEX_TOKEN_TTL,
+            refresh_token=new_refresh_token,
+            scope=row["scope"] or "",
+        )
+
+    return jsonify(error="unsupported_grant_type"), 400
+
+
+def _yandex_unauthorized():
+    return jsonify(error="invalid_token"), 401
+
+
+def _yandex_response(request_id, payload, status=200):
+    return jsonify({
+        "request_id": request_id or "",
+        "payload": payload,
+    }), status
+
+
+@app.post("/yandex/v1.0/user/devices")
+def yandex_devices():
+    user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
+    if not user_id:
+        return _yandex_unauthorized()
+
+    body = request.get_json(silent=True) or {}
+    request_id = body.get("request_id") or body.get("requestId")
+
+    devices = []
+    for device in _fetch_yandex_devices(user_id):
+        devices.append({
+            "id": device["id"],
+            "name": device["name"],
+            "type": "devices.types.other",
+            "capabilities": [
+                {
+                    "type": "devices.capabilities.on_off",
+                    "retrievable": True,
+                }
+            ],
+            "properties": [],
+        })
+
+    payload = {
+        "user_id": str(user_id),
+        "devices": devices,
+    }
+    return _yandex_response(request_id, payload)
+
+
+@app.post("/yandex/v1.0/user/devices/query")
+def yandex_devices_query():
+    user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
+    if not user_id:
+        return _yandex_unauthorized()
+
+    body = request.get_json(silent=True) or {}
+    request_id = body.get("request_id") or body.get("requestId")
+    requested_devices = body.get("payload", {}).get("devices") or []
+
+    devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
+
+    results = []
+    for item in requested_devices:
+        dev_id = item.get("id")
+        current = devices.get(dev_id)
+        if not current:
+            results.append({
+                "id": dev_id,
+                "error_code": "DEVICE_UNREACHABLE",
+                "error_message": "Устройство не найдено",
+            })
+            continue
+        results.append({
+            "id": current["id"],
+            "capabilities": [
+                {
+                    "type": "devices.capabilities.on_off",
+                    "state": {
+                        "instance": "on",
+                        "value": bool(current["power"]),
+                    },
+                }
+            ],
+            "properties": [],
+        })
+
+    return _yandex_response(request_id, {"devices": results})
+
+
+@app.post("/yandex/v1.0/user/devices/action")
+def yandex_devices_action():
+    user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
+    if not user_id:
+        return _yandex_unauthorized()
+
+    body = request.get_json(silent=True) or {}
+    request_id = body.get("request_id") or body.get("requestId")
+    payload_devices = body.get("payload", {}).get("devices") or []
+
+    devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
+    results = []
+
+    for item in payload_devices:
+        dev_id = item.get("id")
+        current = devices.get(dev_id)
+        device_result = {"id": dev_id, "capabilities": []}
+        if not current:
+            device_result["capabilities"].append({
+                "type": "devices.capabilities.on_off",
+                "state": {
+                    "instance": "on",
+                    "action_result": {
+                        "status": "ERROR",
+                        "error_code": "DEVICE_NOT_FOUND",
+                    },
+                },
+            })
+            results.append(device_result)
+            continue
+
+        caps = item.get("capabilities") or []
+        for cap in caps:
+            if cap.get("type") != "devices.capabilities.on_off":
+                device_result.setdefault("capabilities", []).append({
+                    "type": cap.get("type"),
+                    "state": {
+                        "instance": cap.get("state", {}).get("instance", "on"),
+                        "action_result": {
+                            "status": "ERROR",
+                            "error_code": "NOT_SUPPORTED_IN_CURRENT_MODE",
+                        },
+                    },
+                })
+                continue
+
+            desired = cap.get("state", {}).get("value")
+            desired_bool = bool(desired)
+            if not current["online"]:
+                device_result["capabilities"].append({
+                    "type": "devices.capabilities.on_off",
+                    "state": {
+                        "instance": "on",
+                        "action_result": {
+                            "status": "ERROR",
+                            "error_code": "DEVICE_UNREACHABLE",
+                        },
+                    },
+                })
+                continue
+
+            try:
+                bridge.publish_cmd(dev_id, {"on": desired_bool})
+                _update_device_field(dev_id, "on_state", 1 if desired_bool else 0)
+                device_result["capabilities"].append({
+                    "type": "devices.capabilities.on_off",
+                    "state": {
+                        "instance": "on",
+                        "action_result": {
+                            "status": "DONE",
+                        },
+                    },
+                })
+            except Exception:
+                device_result["capabilities"].append({
+                    "type": "devices.capabilities.on_off",
+                    "state": {
+                        "instance": "on",
+                        "action_result": {
+                            "status": "ERROR",
+                            "error_code": "INTERNAL_ERROR",
+                        },
+                    },
+                })
+
+        results.append(device_result)
+
+    return _yandex_response(request_id, {"devices": results})
+
+
+@app.post("/yandex/v1.0/user/unlink")
+def yandex_unlink():
+    body = request.get_json(silent=True) or {}
+    user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
+    if not user_id:
+        # fallback to payload user_id
+        payload_user = body.get("payload", {}).get("user_id") if isinstance(body.get("payload"), dict) else None
+        if payload_user:
+            try:
+                user_id = int(str(payload_user).split(":", 1)[0])
+            except ValueError:
+                user_id = None
+    if not user_id:
+        return _yandex_unauthorized()
+
+    with db() as con:
+        con.execute("DELETE FROM yandex_tokens WHERE user_id=?", (user_id,))
+
+    request_id = body.get("request_id") or body.get("requestId")
+    return _yandex_response(request_id, {"status": "OK"})
+
+
+@app.post("/yandex/unlink_all")
+@login_required
+def yandex_unlink_all_ui():
+    with db() as con:
+        con.execute("DELETE FROM yandex_tokens WHERE user_id=?", (g.user["id"],))
+    flash("Все аккаунты Яндекс.Алисы отвязаны.")
+    return redirect(url_for("devices"))
+
+
 # ---------- РОУТЫ ----------
 @app.get("/")
 def index():
     devices = fetch_user_devices(g.user["id"]) if g.user else []
-    return render_template("index.html", user=g.user, devices=devices, year=datetime.now().year)
+    yandex_count = _count_yandex_links(g.user["id"]) if g.user else 0
+    return render_template(
+        "index.html",
+        user=g.user,
+        devices=devices,
+        year=datetime.now().year,
+        yandex_account_count=yandex_count,
+        yandex_link_url=YANDEX_LINK_URL,
+    )
 
 @app.get("/devices")
 @login_required
 def devices():
     devices = fetch_user_devices(g.user["id"]) if g.user else []
-    return render_template("index.html", user=g.user, devices=devices, year=datetime.now().year)
+    yandex_count = _count_yandex_links(g.user["id"]) if g.user else 0
+    return render_template(
+        "index.html",
+        user=g.user,
+        devices=devices,
+        year=datetime.now().year,
+        yandex_account_count=yandex_count,
+        yandex_link_url=YANDEX_LINK_URL,
+    )
 
 # --- Аутентификация ---
 @app.post("/register")
@@ -433,6 +997,9 @@ def register():
             return redirect(url_for("index") + "#register")
 
     session["uid"] = uid
+    next_url = session.pop("post_login_redirect", None)
+    if next_url and next_url.startswith("/"):
+        return redirect(next_url, code=303)
     return redirect(url_for("devices"), code=303)
 
 @app.post("/login")
@@ -445,6 +1012,9 @@ def login():
             flash("Неверный email или пароль.")
             return redirect(url_for("index") + "#login")
         session["uid"] = row["id"]
+    next_url = session.pop("post_login_redirect", None)
+    if next_url and next_url.startswith("/"):
+        return redirect(next_url, code=303)
     return redirect(url_for("devices"), code=303)
 
 @app.get("/logout")
