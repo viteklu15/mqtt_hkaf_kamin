@@ -37,6 +37,47 @@ SSE_PING_INTERVAL = 15
 FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 7)]
 FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
 
+# Поддерживаемые режимы сушильного шкафа для Алисы (шесть предустановок)
+DRYER_PROGRAM_MODES = [
+    ("one", "1"),
+    ("two", "2"),
+    ("three", "3"),
+    ("four", "4"),
+    ("five", "5"),
+    ("six", "6"),
+]
+
+DRYER_PROGRAM_YA_TO_DEVICE = {ya: device for ya, device in DRYER_PROGRAM_MODES}
+DRYER_PROGRAM_DEVICE_TO_YA = {device: ya for ya, device in DRYER_PROGRAM_MODES}
+DRYER_PROGRAM_ALIASES = {
+    "standard": DRYER_PROGRAM_MODES[0][1],
+    "std": DRYER_PROGRAM_MODES[0][1],
+}
+DRYER_PROGRAM_DEFAULT_DEVICE = DRYER_PROGRAM_MODES[0][1]
+
+
+def _normalize_dryer_program_device_value(value):
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower in DRYER_PROGRAM_ALIASES:
+        return DRYER_PROGRAM_ALIASES[lower]
+    if lower in DRYER_PROGRAM_YA_TO_DEVICE:
+        return DRYER_PROGRAM_YA_TO_DEVICE[lower]
+    if lower in DRYER_PROGRAM_DEVICE_TO_YA:
+        return raw
+    return None
+
+
+def _dryer_program_device_to_yandex(value):
+    normalized = _normalize_dryer_program_device_value(value)
+    if not normalized:
+        normalized = DRYER_PROGRAM_DEFAULT_DEVICE
+    return DRYER_PROGRAM_DEVICE_TO_YA.get(normalized, DRYER_PROGRAM_MODES[0][0])
+
 
 def _generate_token(length: int = 32) -> str:
     return secrets.token_urlsafe(length)
@@ -177,7 +218,7 @@ def _append_query(url: str, params: dict) -> str:
 def _fetch_yandex_devices(user_id: int):
     with db() as con:
         rows = con.execute(
-            "SELECT device_id, name, kind, on_state, state_json FROM devices WHERE user_id=?",
+            "SELECT device_id, name, kind, on_state, program, state_json FROM devices WHERE user_id=?",
             (user_id,),
         ).fetchall()
 
@@ -190,11 +231,19 @@ def _fetch_yandex_devices(user_id: int):
         power_state = bool(row["on_state"])
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
+
+        program_value = state_payload.get("program") if isinstance(state_payload, dict) else None
+        if program_value is None:
+            program_value = row["program"]
+        program_device_value = _normalize_dryer_program_device_value(program_value)
+        if not program_device_value:
+            program_device_value = DRYER_PROGRAM_DEFAULT_DEVICE
         devices.append({
             "id": row["device_id"],
             "name": row["name"] or "Сушильный шкаф",
             "online": bool(ONLINE.get(row["device_id"])),
             "power": power_state,
+            "program": program_device_value,
         })
     return devices
 
@@ -824,7 +873,15 @@ def yandex_devices():
                 {
                     "type": "devices.capabilities.on_off",
                     "retrievable": True,
-                }
+                },
+                {
+                    "type": "devices.capabilities.mode",
+                    "retrievable": True,
+                    "parameters": {
+                        "instance": "program",
+                        "modes": [{"value": ya_value} for ya_value, _ in DRYER_PROGRAM_MODES],
+                    },
+                },
             ],
             "properties": [],
         })
@@ -860,6 +917,7 @@ def yandex_devices_query():
                 "error_message": "Устройство не найдено",
             })
             continue
+        program_state_value = _dryer_program_device_to_yandex(current.get("program"))
         results.append({
             "id": current["id"],
             "capabilities": [
@@ -869,7 +927,14 @@ def yandex_devices_query():
                         "instance": "on",
                         "value": bool(current["power"]),
                     },
-                }
+                },
+                {
+                    "type": "devices.capabilities.mode",
+                    "state": {
+                        "instance": "program",
+                        "value": program_state_value,
+                    },
+                },
             ],
             "properties": [],
         })
@@ -911,54 +976,122 @@ def yandex_devices_action():
 
         caps = item.get("capabilities") or []
         for cap in caps:
-            if cap.get("type") != "devices.capabilities.on_off":
-                device_result.setdefault("capabilities", []).append({
-                    "type": cap.get("type"),
-                    "state": {
-                        "instance": cap.get("state", {}).get("instance", "on"),
-                        "action_result": {
-                            "status": "ERROR",
-                            "error_code": "NOT_SUPPORTED_IN_CURRENT_MODE",
-                        },
-                    },
-                })
-                continue
+            cap_type = cap.get("type")
+            cap_state = cap.get("state") or {}
+            instance = cap_state.get("instance")
 
-            desired = cap.get("state", {}).get("value")
-            desired_bool = bool(desired)
-            if not current["online"]:
-                device_result["capabilities"].append({
-                    "type": "devices.capabilities.on_off",
-                    "state": {
-                        "instance": "on",
-                        "action_result": {
-                            "status": "ERROR",
-                            "error_code": "DEVICE_UNREACHABLE",
+            if cap_type == "devices.capabilities.on_off" and instance in (None, "on"):
+                desired = cap_state.get("value")
+                desired_bool = _bool_from_payload(desired, False)
+                if not current["online"]:
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.on_off",
+                        "state": {
+                            "instance": "on",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "DEVICE_UNREACHABLE",
+                            },
                         },
-                    },
-                })
-                continue
+                    })
+                    continue
 
-            try:
-                bridge.publish_cmd(dev_id, {"on": desired_bool})
-                _update_device_field(dev_id, "on_state", 1 if desired_bool else 0)
-                device_result["capabilities"].append({
-                    "type": "devices.capabilities.on_off",
-                    "state": {
-                        "instance": "on",
-                        "action_result": {
-                            "status": "DONE",
+                try:
+                    bridge.publish_cmd(dev_id, {"on": desired_bool})
+                    _update_device_field(dev_id, "on_state", 1 if desired_bool else 0)
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.on_off",
+                        "state": {
+                            "instance": "on",
+                            "action_result": {
+                                "status": "DONE",
+                            },
                         },
-                    },
-                })
-            except Exception:
+                    })
+                except Exception:
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.on_off",
+                        "state": {
+                            "instance": "on",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "INTERNAL_ERROR",
+                            },
+                        },
+                    })
+            elif cap_type == "devices.capabilities.mode" and instance == "program":
+                desired_value = cap_state.get("value")
+                if not isinstance(desired_value, str):
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.mode",
+                        "state": {
+                            "instance": "program",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "INVALID_VALUE",
+                            },
+                        },
+                    })
+                    continue
+
+                desired_device_value = DRYER_PROGRAM_YA_TO_DEVICE.get(desired_value.lower())
+                if not desired_device_value:
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.mode",
+                        "state": {
+                            "instance": "program",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "INVALID_VALUE",
+                            },
+                        },
+                    })
+                    continue
+
+                if not current["online"]:
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.mode",
+                        "state": {
+                            "instance": "program",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "DEVICE_UNREACHABLE",
+                            },
+                        },
+                    })
+                    continue
+
+                try:
+                    bridge.publish_cmd(dev_id, {"program": desired_device_value})
+                    _update_device_field(dev_id, "program", desired_device_value)
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.mode",
+                        "state": {
+                            "instance": "program",
+                            "action_result": {
+                                "status": "DONE",
+                            },
+                        },
+                    })
+                except Exception:
+                    device_result["capabilities"].append({
+                        "type": "devices.capabilities.mode",
+                        "state": {
+                            "instance": "program",
+                            "action_result": {
+                                "status": "ERROR",
+                                "error_code": "INTERNAL_ERROR",
+                            },
+                        },
+                    })
+            else:
                 device_result["capabilities"].append({
-                    "type": "devices.capabilities.on_off",
+                    "type": cap_type,
                     "state": {
-                        "instance": "on",
+                        "instance": instance or "on",
                         "action_result": {
                             "status": "ERROR",
-                            "error_code": "INTERNAL_ERROR",
+                            "error_code": "INVALID_ACTION",
                         },
                     },
                 })
