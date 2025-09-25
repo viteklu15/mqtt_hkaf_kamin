@@ -621,6 +621,54 @@ def _state_to_db(device_id: str, kind: str, payload):
 register_state_handler(_state_to_db)
 
 # ---------- OAuth 2.0 для Яндекс.Алисы ----------
+@app.route("/callback", methods=["GET", "POST"])
+def oauth_callback():
+    if request.method == "POST":
+        if request.mimetype == "application/json":
+            body = request.get_json(silent=True) or {}
+        else:
+            body = request.form.to_dict() or {}
+    else:
+        body = request.args.to_dict() or {}
+
+    code = body.get("code") or request.args.get("code")
+    state = body.get("state") or request.args.get("state")
+
+    if not code:
+        app.logger.warning("/callback called without authorization code", extra={"state": state, "body": body})
+        return jsonify(error="invalid_request", error_description="code_required"), 400
+
+    code_payload = _load_oauth_code(code)
+    if not code_payload:
+        app.logger.warning("/callback received invalid or expired code", extra={"code": code, "state": state})
+        return jsonify(error="invalid_grant"), 400
+
+    client_id = code_payload.get("client_id") or body.get("client_id") or YANDEX_CLIENT_ID
+    if not _validate_yandex_client(client_id):
+        app.logger.warning(
+            "/callback received code for unexpected client", extra={"client_id": client_id, "state": state}
+        )
+        return jsonify(error="unauthorized_client"), 401
+
+    access_token, refresh_token, expires_at = _create_or_update_yandex_tokens(
+        code_payload["user_id"],
+        client_id,
+        code_payload.get("scope"),
+        external_id=code_payload.get("state"),
+    )
+
+    response_payload = {
+        "status": "ok",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": YANDEX_TOKEN_TTL,
+        "state": state or code_payload.get("state") or "",
+    }
+
+    return jsonify(response_payload)
+
+
 @app.route("/oauth/authorize", methods=["GET", "POST"])
 def oauth_authorize():
     response_type = request.values.get("response_type", "code").lower()
