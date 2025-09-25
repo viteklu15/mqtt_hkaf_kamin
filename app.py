@@ -135,10 +135,21 @@ def _load_oauth_code(code: str):
     return dict(row)
 
 
-def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
-                                    external_id=None):
+def _create_or_update_yandex_tokens(
+    user_id: int,
+    client_id: str,
+    scope=None,
+    refresh_token=None,
+    external_id=None,
+    *,
+    rotate_refresh: bool = True,
+):
     access_token = _generate_token(32)
-    new_refresh_token = _generate_token(32)
+    refresh_to_store = (
+        _generate_token(32)
+        if rotate_refresh or not refresh_token
+        else refresh_token
+    )
     access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
     refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
     with db() as con:
@@ -155,7 +166,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                 " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
                 (
                     access_token,
-                    new_refresh_token,
+                    refresh_to_store,
                     scope,
                     external_id,
                     access_exp,
@@ -172,7 +183,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                     user_id,
                     client_id,
                     access_token,
-                    new_refresh_token,
+                    refresh_to_store,
                     scope,
                     external_id,
                     access_exp,
@@ -181,7 +192,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                     _now_iso(),
                 ),
             )
-    return access_token, new_refresh_token, access_exp
+    return access_token, refresh_to_store, access_exp
 
 
 def _get_user_id_from_bearer(auth_header: str):
@@ -843,15 +854,19 @@ def oauth_token():
         refresh_exp = _parse_iso(row["refresh_expires_at"])
         if refresh_exp and refresh_exp < _now_utc():
             return jsonify(error="invalid_grant"), 400
-        access_token, new_refresh_token, _ = _create_or_update_yandex_tokens(
-            row["user_id"], client_id, row["scope"], refresh_token=refresh_token,
+        access_token, effective_refresh_token, _ = _create_or_update_yandex_tokens(
+            row["user_id"],
+            client_id,
+            row["scope"],
+            refresh_token=refresh_token,
             external_id=row["external_account_id"],
+            rotate_refresh=False,
         )
         return jsonify(
             access_token=access_token,
             token_type="bearer",
             expires_in=YANDEX_TOKEN_TTL,
-            refresh_token=new_refresh_token,
+            refresh_token=effective_refresh_token,
             scope=row["scope"] or "",
         )
 
