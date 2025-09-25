@@ -23,6 +23,7 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
+YA_OFFLINE_GRACE_SECONDS = int(os.environ.get("YA_OFFLINE_GRACE_SECONDS", 120))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -245,7 +246,7 @@ def _append_query(url: str, params: dict) -> str:
 def _fetch_yandex_devices(user_id: int):
     with db() as con:
         rows = con.execute(
-            "SELECT device_id, name, kind, on_state, program, state_json FROM devices WHERE user_id=?",
+            "SELECT device_id, name, kind, on_state, program, state_json, last_seen FROM devices WHERE user_id=?",
             (user_id,),
         ).fetchall()
 
@@ -268,7 +269,7 @@ def _fetch_yandex_devices(user_id: int):
         devices.append({
             "id": row["device_id"],
             "name": row["name"] or "Сушильный шкаф",
-            "online": bool(ONLINE.get(row["device_id"])),
+            "online": _is_device_online(row["device_id"], row["last_seen"]),
             "power": power_state,
             "program": program_device_value,
         })
@@ -366,6 +367,22 @@ def _parse_iso(dt: str):
     except ValueError:
         return None
 
+
+def _is_device_online(device_id: str, last_seen):
+    if ONLINE.get(device_id):
+        return True
+    if isinstance(last_seen, datetime):
+        last_seen_dt = last_seen
+    else:
+        last_seen_dt = _parse_iso(last_seen) if last_seen else None
+    if not last_seen_dt:
+        return False
+    try:
+        delta = _now_utc() - last_seen_dt
+    except TypeError:
+        return False
+    return delta.total_seconds() <= YA_OFFLINE_GRACE_SECONDS
+
 # ---------- Текущий пользователь ----------
 def current_user():
     uid = session.get("uid")
@@ -459,11 +476,13 @@ def fetch_user_devices(user_id: int):
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
+        online_status = _is_device_online(device_id, row["last_seen"])
+
         base = {
             "id": device_id,
             "kind": kind,
             "title": row["name"] or ("Камин" if kind == "fireplace" else "Сушильный шкаф"),
-            "online": bool(ONLINE.get(device_id)),
+            "online": online_status,
             "power": power_state,
             "state": state_payload,
             "last_seen": row["last_seen"],
@@ -545,7 +564,7 @@ def _build_device_api_payload(row):
         "device_id": dev_id,
         "name": row["name"],
         "kind": kind,
-        "online": bool(ONLINE.get(dev_id)),
+        "online": _is_device_online(dev_id, row["last_seen"]),
         "on": power_state,
         "program": row["program"],
         "last_seen": row["last_seen"],
@@ -584,7 +603,7 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
     owner_id = None
 
     if device_id:
-        online = bool(ONLINE.get(device_id))
+        online = _is_device_online(device_id, None)
 
         close_conn = False
         if con is None:
@@ -592,11 +611,12 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
             close_conn = True
         try:
             row = con.execute(
-                "SELECT user_id FROM devices WHERE device_id=?",
+                "SELECT user_id, last_seen FROM devices WHERE device_id=?",
                 (device_id,)
             ).fetchone()
             if row:
                 owner_id = row["user_id"]
+                online = _is_device_online(device_id, row["last_seen"])
         finally:
             if close_conn:
                 con.close()
@@ -878,10 +898,36 @@ def _yandex_unauthorized():
 
 
 def _yandex_response(request_id, payload, status=200):
-    return jsonify({
+    response = jsonify({
         "request_id": request_id or "",
         "payload": payload,
-    }), status
+    })
+    response.headers["X-Request-Id"] = request_id or ""
+    return response, status
+
+
+def _yandex_simple_response(request_id, status=200):
+    response = jsonify({"request_id": request_id or ""})
+    response.headers["X-Request-Id"] = request_id or ""
+    return response, status
+
+
+def _extract_request_id(body=None):
+    header_request_id = request.headers.get("X-Request-Id")
+    if header_request_id:
+        return header_request_id
+    if isinstance(body, dict):
+        return body.get("request_id") or body.get("requestId")
+    return None
+
+
+@app.route("/yandex/v1.0/", methods=["HEAD"])
+@app.route("/v1.0/", methods=["HEAD"])
+def yandex_ping():
+    request_id = request.headers.get("X-Request-Id") or ""
+    response = Response(status=200)
+    response.headers["X-Request-Id"] = request_id
+    return response
 
 
 @app.route("/yandex/v1.0/user/devices", methods=["POST"])
@@ -892,7 +938,7 @@ def yandex_devices():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    request_id = body.get("request_id") or body.get("requestId")
+    request_id = _extract_request_id(body)
 
     devices = []
     for device in _fetch_yandex_devices(user_id):
@@ -933,9 +979,8 @@ def yandex_devices_query():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    app.logger.info("[YA QUERY] request: %r", body)
-
-    request_id = body.get("request_id") or body.get("requestId")
+    request_id = _extract_request_id(body)
+    app.logger.info("[YA QUERY] request_id=%s body=%r", request_id, body)
     # ВАЖНО: поддерживаем оба варианта — с payload и без
     requested_devices = (body.get("payload", {}).get("devices")
                          or body.get("devices")
@@ -971,7 +1016,7 @@ def yandex_devices_query():
         })
 
     resp_payload = {"devices": results}
-    app.logger.info("[YA QUERY] response: %r", resp_payload)
+    app.logger.info("[YA QUERY] request_id=%s response=%r", request_id, resp_payload)
     return _yandex_response(request_id, resp_payload)
 
 
@@ -986,7 +1031,8 @@ def yandex_devices_action():
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
-    request_id = body.get("request_id") or body.get("requestId")
+    request_id = _extract_request_id(body)
+    app.logger.info("[YA ACTION] request_id=%s body=%r", request_id, body)
     payload_devices = body.get("payload", {}).get("devices") or []
 
     devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
@@ -1136,7 +1182,9 @@ def yandex_devices_action():
 
         results.append(device_result)
 
-    return _yandex_response(request_id, {"devices": results})
+    response_payload = {"devices": results}
+    app.logger.info("[YA ACTION] request_id=%s response=%r", request_id, response_payload)
+    return _yandex_response(request_id, response_payload)
 
 
 @app.post("/yandex/v1.0/user/unlink")
@@ -1157,8 +1205,9 @@ def yandex_unlink():
     with db() as con:
         con.execute("DELETE FROM yandex_tokens WHERE user_id=?", (user_id,))
 
-    request_id = body.get("request_id") or body.get("requestId")
-    return _yandex_response(request_id, {"status": "OK"})
+    request_id = _extract_request_id(body)
+    app.logger.info("[YA UNLINK] request_id=%s body=%r", request_id, body)
+    return _yandex_simple_response(request_id)
 
 
 @app.post("/yandex/unlink_all")
