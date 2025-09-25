@@ -5,6 +5,7 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import logging
+import requests
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -23,6 +24,16 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
+
+YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID")
+YANDEX_SKILL_TOKEN = os.environ.get("YANDEX_SKILL_TOKEN")
+YANDEX_STATE_URL = os.environ.get("YANDEX_STATE_URL")
+if not YANDEX_STATE_URL and YANDEX_SKILL_ID:
+    YANDEX_STATE_URL = f"https://dialogs.yandex.net/api/v1/skills/{YANDEX_SKILL_ID}/callback/state"
+YANDEX_STATE_AUTH = os.environ.get("YANDEX_STATE_AUTH")
+if not YANDEX_STATE_AUTH and YANDEX_SKILL_TOKEN:
+    YANDEX_STATE_AUTH = f"Bearer {YANDEX_SKILL_TOKEN}"
+YANDEX_STATE_TIMEOUT = float(os.environ.get("YANDEX_STATE_TIMEOUT", 5.0))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -405,6 +416,81 @@ def _broadcast_device_event(user_id: int, kind: str, device_payload: dict):
             continue
 
 
+def _build_yandex_state_report(user_id: int, device_payload: dict):
+    if not user_id or not device_payload:
+        return None
+    if (device_payload.get("kind") or "").lower() != "dryer":
+        return None
+
+    program_value = device_payload.get("program")
+    if isinstance(device_payload.get("state"), dict):
+        program_value = device_payload["state"].get("program", program_value)
+    program_state_value = _dryer_program_device_to_yandex(program_value)
+
+    capability_states = [
+        {
+            "type": "devices.capabilities.on_off",
+            "state": {"instance": "on", "value": bool(device_payload.get("on"))},
+        },
+        {
+            "type": "devices.capabilities.mode",
+            "state": {"instance": "program", "value": program_state_value},
+        },
+    ]
+
+    return {
+        "user_id": str(user_id),
+        "devices": [
+            {
+                "id": device_payload.get("device_id"),
+                "capabilities": capability_states,
+                "properties": [],
+            }
+        ],
+    }
+
+
+def _push_yandex_state_update(user_id: int, device_payload: dict):
+    if not YANDEX_STATE_URL:
+        return
+
+    payload = _build_yandex_state_report(user_id, device_payload)
+    if not payload:
+        return
+
+    headers = {"Content-Type": "application/json"}
+    if YANDEX_STATE_AUTH:
+        headers["Authorization"] = YANDEX_STATE_AUTH
+
+    def _sender():
+        try:
+            resp = requests.post(
+                YANDEX_STATE_URL,
+                json=payload,
+                headers=headers,
+                timeout=YANDEX_STATE_TIMEOUT,
+            )
+            if resp.status_code >= 400:
+                app.logger.warning(
+                    "[YA STATE] push failed", extra={
+                        "status": resp.status_code,
+                        "body": resp.text,
+                        "device_id": device_payload.get("device_id"),
+                        "user_id": user_id,
+                    }
+                )
+        except Exception as exc:
+            app.logger.warning(
+                "[YA STATE] push error", extra={
+                    "error": str(exc),
+                    "device_id": device_payload.get("device_id"),
+                    "user_id": user_id,
+                }
+            )
+
+    threading.Thread(target=_sender, daemon=True).start()
+
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -657,6 +743,7 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
+                _push_yandex_state_update(user_id, device_payload)
             return
         if kind == "state" and isinstance(payload, dict):
             fields, values = [], []
@@ -684,6 +771,7 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
+                _push_yandex_state_update(user_id, device_payload)
 
 register_state_handler(_state_to_db)
 
