@@ -5,9 +5,6 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import logging
-import time
-
-import requests
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -26,10 +23,6 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
-
-YANDEX_STATE_CALLBACK_URL = os.environ.get("YANDEX_STATE_CALLBACK_URL")
-YANDEX_STATE_CALLBACK_TOKEN = os.environ.get("YANDEX_STATE_CALLBACK_TOKEN")
-YANDEX_STATE_CALLBACK_TIMEOUT = float(os.environ.get("YANDEX_STATE_CALLBACK_TIMEOUT", 5))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -222,22 +215,6 @@ def _count_yandex_links(user_id: int) -> int:
     return int(row["cnt"] if row else 0)
 
 
-def _has_active_yandex_link(user_id: int, con=None) -> bool:
-    close_conn = False
-    if con is None:
-        con = db()
-        close_conn = True
-    try:
-        row = con.execute(
-            "SELECT 1 FROM yandex_tokens WHERE user_id=? AND refresh_expires_at>? LIMIT 1",
-            (user_id, _now_iso()),
-        ).fetchone()
-        return bool(row)
-    finally:
-        if close_conn:
-            con.close()
-
-
 def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
     if client_id != YANDEX_CLIENT_ID:
         return False
@@ -426,82 +403,6 @@ def _broadcast_device_event(user_id: int, kind: str, device_payload: dict):
             q.put_nowait(message)
         except queue.Full:
             continue
-
-
-def _build_yandex_state_payload(device_payload: dict):
-    if not device_payload:
-        return None
-    if device_payload.get("kind") != "dryer":
-        return None
-
-    state = device_payload.get("state") or {}
-    program_value = state.get("program") if isinstance(state, dict) else None
-    if program_value is None:
-        program_value = device_payload.get("program")
-    ya_program_value = _dryer_program_device_to_yandex(program_value)
-
-    power_state = bool(device_payload.get("on"))
-    if isinstance(state, dict) and "on" in state:
-        power_state = _bool_from_payload(state.get("on"), power_state)
-
-    payload = {
-        "id": device_payload.get("device_id"),
-        "capabilities": [
-            {
-                "type": "devices.capabilities.on_off",
-                "state": {"instance": "on", "value": power_state},
-            },
-            {
-                "type": "devices.capabilities.mode",
-                "state": {"instance": "program", "value": ya_program_value},
-            },
-        ],
-        "properties": [],
-    }
-
-    if "online" in device_payload:
-        payload["state"] = {"online": bool(device_payload.get("online"))}
-
-    return payload
-
-
-def _push_yandex_device_state(user_id: int, device_payload: dict):
-    if not (YANDEX_STATE_CALLBACK_URL and YANDEX_STATE_CALLBACK_TOKEN):
-        return
-
-    ya_payload = _build_yandex_state_payload(device_payload)
-    if not ya_payload:
-        return
-
-    body = {
-        "ts": int(time.time() * 1000),
-        "payload": {
-            "user_id": str(user_id),
-            "devices": [ya_payload],
-        },
-    }
-
-    headers = {
-        "Authorization": f"Bearer {YANDEX_STATE_CALLBACK_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = requests.post(
-            YANDEX_STATE_CALLBACK_URL,
-            json=body,
-            headers=headers,
-            timeout=YANDEX_STATE_CALLBACK_TIMEOUT,
-        )
-    except Exception as exc:
-        app.logger.warning("[YA PUSH] failed to send state: %s", exc)
-        return
-
-    if resp.status_code >= 400:
-        preview = resp.text[:300] if resp.text else ""
-        app.logger.warning(
-            "[YA PUSH] error response status=%s body=%r", resp.status_code, preview
-        )
 
 
 def login_required(fn):
@@ -741,9 +642,6 @@ def _load_device_payload_for_user(con, device_id: str, user_id: int):
 
 # ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
 def _state_to_db(device_id: str, kind: str, payload):
-    user_id = None
-    yandex_payload = None
-    push_yandex = False
     with db() as con:
         row = con.execute(
             "SELECT id, user_id FROM devices WHERE device_id=?",
@@ -786,12 +684,6 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
-                if _has_active_yandex_link(user_id, con):
-                    yandex_payload = device_payload
-                    push_yandex = True
-
-    if push_yandex and yandex_payload and user_id is not None:
-        _push_yandex_device_state(user_id, yandex_payload)
 
 register_state_handler(_state_to_db)
 
