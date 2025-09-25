@@ -1445,6 +1445,42 @@ def _update_device_field(device_id: str, field: str, value):
         con.execute(f"UPDATE devices SET {field}=? WHERE device_id=?", (value, device_id))
 
 
+def _update_device_state_json_fields(device_id: str, updates: dict):
+    if not updates:
+        return
+
+    with db() as con:
+        row = con.execute(
+            "SELECT state_json FROM devices WHERE device_id=?",
+            (device_id,),
+        ).fetchone()
+
+        if not row:
+            return
+
+        state_payload = _load_state_payload(row["state_json"])
+        changed = False
+
+        for key, value in updates.items():
+            if value is None:
+                if key in state_payload:
+                    del state_payload[key]
+                    changed = True
+                continue
+
+            if state_payload.get(key) != value:
+                state_payload[key] = value
+                changed = True
+
+        if not changed:
+            return
+
+        con.execute(
+            "UPDATE devices SET state_json=? WHERE device_id=?",
+            (json.dumps(state_payload, ensure_ascii=False), device_id),
+        )
+
+
 @app.post("/api/device/<device_id>/power")
 @login_required
 def api_device_power(device_id):
@@ -1471,6 +1507,7 @@ def api_device_power(device_id):
         return jsonify(ok=False, message=f"MQTT ошибка: {e}"), 502
 
     _update_device_field(device_id, "on_state", 1 if on_state else 0)
+    _update_device_state_json_fields(device_id, {"on": on_state})
     return jsonify(ok=True)
 
 
@@ -1498,6 +1535,8 @@ def api_device_set(device_id):
 
     if key in {"program", "mode"} and isinstance(value, str):
         _update_device_field(device_id, "program", value)
+
+    _update_device_state_json_fields(device_id, {key: value})
 
     return jsonify(ok=True)
 
