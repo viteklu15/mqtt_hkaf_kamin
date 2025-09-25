@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
+import logging
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -25,6 +26,7 @@ YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
+app.logger.setLevel(logging.WARNING)   # чтобы INFO было видно в консоли
 
 # Очереди SSE-обновлений устройств
 DEVICE_EVENT_SUBSCRIBERS = {}
@@ -38,22 +40,36 @@ FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 7)]
 FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
 
 # Поддерживаемые режимы сушильного шкафа для Алисы (шесть предустановок)
+# Поддерживаемые режимы сушильного шкафа для Алисы (one..six ↔ 1..6)
 DRYER_PROGRAM_MODES = [
-    ("one", "1"),
-    ("two", "2"),
+    ("one",   "1"),
+    ("two",   "2"),
     ("three", "3"),
-    ("four", "4"),
-    ("five", "5"),
-    ("six", "6"),
+    ("four",  "4"),
+    ("five",  "5"),
+    ("six",   "6"),
 ]
+
+# Алиасы из вашего UI (рус/англ) → «девайсное» значение 1..6
+DRYER_PROGRAM_ALIASES = {
+    # 1 — стандарт
+    "standard": "1", "std": "1", "стандарт": "1",
+    # 2 — быстрая
+    "fast": "2", "quick": "2", "быстро": "2", "быстрая": "2",
+    # 3 — без нагрева / проветривание
+    "noheat": "3", "air": "3", "безнагрева": "3", "без_нагрева": "3", "проветривание": "3",
+    # 4 — умный
+    "smart": "4", "умный": "4",
+    # 5 — деликатный / персональный
+    "gentle": "5", "деликатный": "5", "personal": "5", "персональный": "5",
+    # 6 — интенсивный
+    "intense": "6", "интенсивный": "6",
+}
 
 DRYER_PROGRAM_YA_TO_DEVICE = {ya: device for ya, device in DRYER_PROGRAM_MODES}
 DRYER_PROGRAM_DEVICE_TO_YA = {device: ya for ya, device in DRYER_PROGRAM_MODES}
-DRYER_PROGRAM_ALIASES = {
-    "standard": DRYER_PROGRAM_MODES[0][1],
-    "std": DRYER_PROGRAM_MODES[0][1],
-}
 DRYER_PROGRAM_DEFAULT_DEVICE = DRYER_PROGRAM_MODES[0][1]
+
 
 
 def _normalize_dryer_program_device_value(value):
@@ -898,11 +914,17 @@ def yandex_devices():
 def yandex_devices_query():
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
+        app.logger.info("[YA QUERY] unauthorized")
         return _yandex_unauthorized()
 
     body = request.get_json(silent=True) or {}
+    app.logger.info("[YA QUERY] request: %r", body)
+
     request_id = body.get("request_id") or body.get("requestId")
-    requested_devices = body.get("payload", {}).get("devices") or []
+    # ВАЖНО: поддерживаем оба варианта — с payload и без
+    requested_devices = (body.get("payload", {}).get("devices")
+                         or body.get("devices")
+                         or [])
 
     devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
 
@@ -923,23 +945,22 @@ def yandex_devices_query():
             "capabilities": [
                 {
                     "type": "devices.capabilities.on_off",
-                    "state": {
-                        "instance": "on",
-                        "value": bool(current["power"]),
-                    },
+                    "state": {"instance": "on", "value": bool(current["power"])},
                 },
                 {
                     "type": "devices.capabilities.mode",
-                    "state": {
-                        "instance": "program",
-                        "value": program_state_value,
-                    },
+                    "state": {"instance": "program", "value": program_state_value},
                 },
             ],
             "properties": [],
         })
 
-    return _yandex_response(request_id, {"devices": results})
+    resp_payload = {"devices": results}
+    app.logger.info("[YA QUERY] response: %r", resp_payload)
+    return _yandex_response(request_id, resp_payload)
+
+
+
 
 
 @app.route("/yandex/v1.0/user/devices/action", methods=["POST"])
@@ -1518,21 +1539,38 @@ def api_device_power(device_id):
 def api_device_set(device_id):
     device = _get_user_device(device_id)
     if not device:
+        app.logger.info("[SET] %s -> 404 (device not found)", device_id)
         return jsonify(ok=False, message="Устройство не найдено"), 404
-
     if not request.is_json:
+        app.logger.info("[SET] %s -> 400 (not json)", device_id)
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
 
     data = request.get_json(silent=True) or {}
-    items = list(data.items())
-    if not items:
+    if not data:
+        app.logger.info("[SET] %s -> 400 (empty body)", device_id)
         return jsonify(ok=False, message="Не переданы параметры"), 400
 
-    key, value = items[0]
+    # Входящие данные
+    app.logger.info("[SET] %s incoming: %r", device_id, data)
+
+    # Берём первый переданный параметр
+    (key, value), = data.items()
+    raw_key, raw_value = key, value  # для логов до нормализации
+
+    # Если меняем режим — приводим к «1..6»
+    if key in {"program", "mode"} and isinstance(value, str):
+        normalized = _normalize_dryer_program_device_value(value)
+        if normalized:
+            value = normalized
+        key = "program"  # храним и шлём как 'program'
+
+    app.logger.info("[SET] %s normalized: %s=%r (raw %s=%r)",
+                    device_id, key, value, raw_key, raw_value)
 
     try:
         bridge.publish_cmd(device_id, {key: value})
     except Exception as e:
+        app.logger.exception("[SET] %s MQTT publish failed", device_id)
         return jsonify(ok=False, message=f"MQTT ошибка: {e}"), 502
 
     if key in {"program", "mode"} and isinstance(value, str):
@@ -1540,7 +1578,11 @@ def api_device_set(device_id):
 
     _update_device_state_json_fields(device_id, {key: value})
 
-    return jsonify(ok=True)
+    resp = {"ok": True, "key": key, "value": value}
+    app.logger.info("[SET] %s OK, response: %r", device_id, resp)
+    return jsonify(resp)
+
+
 
 
 @app.post("/api/device/<device_id>/rename")
