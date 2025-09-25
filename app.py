@@ -999,6 +999,7 @@ def yandex_devices_action():
                 try:
                     bridge.publish_cmd(dev_id, {"on": desired_bool})
                     _update_device_field(dev_id, "on_state", 1 if desired_bool else 0)
+                    _update_device_state_json_fields(dev_id, {"on": desired_bool})
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.on_off",
                         "state": {
@@ -1064,6 +1065,7 @@ def yandex_devices_action():
                 try:
                     bridge.publish_cmd(dev_id, {"program": desired_device_value})
                     _update_device_field(dev_id, "program", desired_device_value)
+                    _update_device_state_json_fields(dev_id, {"program": desired_device_value})
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
                         "state": {
