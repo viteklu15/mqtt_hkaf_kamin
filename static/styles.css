@@ -13,6 +13,23 @@ body{
   backdrop-filter: blur(10px);
   background: rgba(255,255,255,.06);
 }
+.nav-tab{
+  display:block;
+  width:100%;
+  border:none;
+  background: transparent;
+  color: inherit;
+  text-align:left;
+  cursor:pointer;
+  font: inherit;
+  transition: background-color .15s ease;
+}
+.nav-tab:hover{
+  background-color: rgba(255,255,255,.05);
+}
+.nav-tab.tab-active{
+  background-color: rgba(255,255,255,.08);
+}
 .fire-gradient{
   background:
     radial-gradient(1200px 600px at 40% 0%, rgba(255,110,48,.55), rgba(0,0,0,0) 60%),
