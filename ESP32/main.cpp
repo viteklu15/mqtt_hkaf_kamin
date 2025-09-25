@@ -34,17 +34,17 @@ char TOPIC_PAIR_INDEX[128];   // РЕТЕЙН-индекс: pair/index/<CODE> ->
 
 // ----------- Состояние устройства -----------
 bool onState = false;
-String programState = "one"; // one|two|three|four|five|six
+String programState = "1"; // 1|2|3|4|5|6
 bool soundEnabled = false;
-float currentTempC = 0.0f;
-uint32_t timeLeftSeconds = 0;
+float currentTempC = 45.0f;
+uint32_t timeLeftSeconds = 100;
 
 // Привязка
 Preferences prefs;
 bool isPaired = false;
 
 // Разрешённые программы
-const char* ALLOWED_PROGRAMS[] = {"one","two","three","four","five","six"};
+const char* ALLOWED_PROGRAMS[] = {"1","2","3","4","5","6"};
 bool isAllowedProgram(const String& v) {
   for (auto p : ALLOWED_PROGRAMS) if (v == p) return true;
   return false;
