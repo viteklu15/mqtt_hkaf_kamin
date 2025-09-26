@@ -367,7 +367,9 @@ def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: s
 
     serialized = json.dumps(callback_payload, ensure_ascii=False)
     headers = {
-        "Authorization": f"Bearer {YANDEX_SKILL_TOKEN}",
+        # Yandex Dialogs callback API требует схемы авторизации OAuth,
+        # иначе обновление состояния игнорируется, хотя запрос принимаетcя.
+        "Authorization": f"OAuth {YANDEX_SKILL_TOKEN}",
         "Content-Type": "application/json",
     }
 
