@@ -27,6 +27,7 @@ YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 app = Flask(__name__)
 app.secret_key = APP_SECRET
 app.logger.setLevel(logging.WARNING)   # чтобы INFO было видно в консоли
+# app.logger.setLevel(logging.INFO)   # чтобы INFO было видно в консоли
 
 # Очереди SSE-обновлений устройств
 DEVICE_EVENT_SUBSCRIBERS = {}
@@ -1122,9 +1123,13 @@ def yandex_devices_action():
         results.append(device_result)
 
     return _yandex_response(request_id, {"devices": results})
-
+@app.route("/v1.0", methods=["GET", "HEAD"])
+def yandex_ping():
+    # можно вернуть что угодно 200 OK
+    return ("OK", 200)
 
 @app.post("/yandex/v1.0/user/unlink")
+@app.post("/v1.0/user/unlink")   # <— добавили второй маршрут
 def yandex_unlink():
     body = request.get_json(silent=True) or {}
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
