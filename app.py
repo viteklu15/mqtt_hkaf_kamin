@@ -272,7 +272,7 @@ def _fetch_yandex_devices(user_id: int):
         if kind != "dryer":
             continue
         state_payload = _load_state_payload(row["state_json"])
-        power_state = bool(row["on_state"])
+        power_state = _bool_from_payload(row["on_state"], False)
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
@@ -583,7 +583,7 @@ def fetch_user_devices(user_id: int):
         kind = (row["kind"] or "dryer").lower()
         state_payload = _load_state_payload(row["state_json"])
 
-        power_state = bool(row["on_state"])
+        power_state = _bool_from_payload(row["on_state"], False)
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
@@ -665,7 +665,7 @@ def _build_device_api_payload(row):
     kind = (row["kind"] or "dryer").lower()
     state_payload = _load_state_payload(row["state_json"])
 
-    power_state = bool(row["on_state"])
+    power_state = _bool_from_payload(row["on_state"], False)
     if "on" in state_payload:
         power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
