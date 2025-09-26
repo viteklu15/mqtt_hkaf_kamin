@@ -5,6 +5,7 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import logging
+import requests
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -23,6 +24,13 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
+YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID")
+YANDEX_SKILL_TOKEN = os.environ.get("YANDEX_SKILL_TOKEN")
+YANDEX_CALLBACK_STATE_URL = os.environ.get(
+    "YANDEX_CALLBACK_STATE_URL",
+    "https://dialogs.yandex.net/api/v1/skills/{skill_id}/callback/state",
+)
+YANDEX_CALLBACK_TIMEOUT = float(os.environ.get("YANDEX_CALLBACK_TIMEOUT", 5.0))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -216,6 +224,24 @@ def _count_yandex_links(user_id: int) -> int:
     return int(row["cnt"] if row else 0)
 
 
+def _has_yandex_links_for_user(user_id: int, con=None) -> bool:
+    if not user_id:
+        return False
+    close_conn = False
+    if con is None:
+        con = db()
+        close_conn = True
+    try:
+        row = con.execute(
+            "SELECT 1 FROM yandex_tokens WHERE user_id=? LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        return bool(row)
+    finally:
+        if close_conn and con is not None:
+            con.close()
+
+
 def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
     if client_id != YANDEX_CLIENT_ID:
         return False
@@ -263,6 +289,117 @@ def _fetch_yandex_devices(user_id: int):
             "program": program_device_value,
         })
     return devices
+
+
+def _build_yandex_callback_device(device_payload: dict):
+    if not device_payload:
+        return None
+    device_id = device_payload.get("device_id") or device_payload.get("id")
+    if not device_id:
+        return None
+
+    kind = (device_payload.get("kind") or "dryer").lower()
+    if kind != "dryer":
+        return None
+
+    if not device_payload.get("online"):
+        return {"id": device_id, "error_code": "DEVICE_UNREACHABLE"}
+
+    program_value = _dryer_program_device_to_yandex(device_payload.get("program"))
+    return {
+        "id": device_id,
+        "capabilities": [
+            {
+                "type": "devices.capabilities.on_off",
+                "state": {"instance": "on", "value": bool(device_payload.get("on"))},
+            },
+            {
+                "type": "devices.capabilities.mode",
+                "state": {"instance": "program", "value": program_value},
+            },
+        ],
+        "properties": [],
+    }
+
+
+def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: str, has_link: bool = True):
+    device_id = device_payload.get("device_id") if isinstance(device_payload, dict) else None
+    if not has_link:
+        app.logger.warning(
+            "[YA CALLBACK] skipped device=%s reason=no_links",
+            device_id,
+        )
+        return
+
+    if not YANDEX_SKILL_ID or not YANDEX_SKILL_TOKEN:
+        app.logger.warning(
+            "[YA CALLBACK] skipped device=%s reason=skill_not_configured",
+            device_id,
+        )
+        return
+
+    try:
+        url = (YANDEX_CALLBACK_STATE_URL or "").format(skill_id=YANDEX_SKILL_ID)
+    except KeyError as exc:
+        app.logger.warning(
+            "[YA CALLBACK] skipped device=%s reason=bad_callback_url error=%s",
+            device_id,
+            exc,
+        )
+        return
+
+    device_state = _build_yandex_callback_device(device_payload)
+    if not device_state:
+        app.logger.warning(
+            "[YA CALLBACK] skipped device=%s reason=unsupported_payload",
+            device_id,
+        )
+        return
+
+    callback_payload = {
+        "ts": int(_now_utc().timestamp()),
+        "payload": {
+            "user_id": str(user_id),
+            "devices": [device_state],
+        },
+    }
+
+    serialized = json.dumps(callback_payload, ensure_ascii=False)
+    headers = {
+        "Authorization": f"Bearer {YANDEX_SKILL_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    app.logger.warning(
+        "[YA CALLBACK] sending device=%s kind=%s url=%s payload=%s",
+        device_id,
+        change_kind,
+        url,
+        serialized,
+    )
+
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=callback_payload,
+            timeout=YANDEX_CALLBACK_TIMEOUT,
+        )
+    except Exception as exc:
+        app.logger.warning(
+            "[YA CALLBACK] request_failed device=%s error=%s",
+            device_id,
+            exc,
+        )
+        return
+
+    app.logger.warning(
+        "[YA CALLBACK] response device=%s status=%s body=%s",
+        device_id,
+        response.status_code,
+        response.text,
+    )
+
 
 # ---------- БД ----------
 def db():
@@ -658,6 +795,8 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
+                has_link = _has_yandex_links_for_user(user_id, con)
+                _send_yandex_state_update(user_id, device_payload, kind, has_link)
             return
         if kind == "state" and isinstance(payload, dict):
             fields, values = [], []
@@ -685,6 +824,8 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
+                has_link = _has_yandex_links_for_user(user_id, con)
+                _send_yandex_state_update(user_id, device_payload, kind, has_link)
 
 register_state_handler(_state_to_db)
 
