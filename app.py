@@ -24,8 +24,9 @@ YANDEX_LINK_URL = os.environ.get(
 
 YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
-YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID")
-YANDEX_SKILL_TOKEN = os.environ.get("YANDEX_SKILL_TOKEN")
+YANDEX_SKILL_ID = "7c169e54-a714-4398-9cf2-87f2bb868341"
+YANDEX_SKILL_TOKEN = "y0__xCUs-BsGKP3EyDAwPPAFDDdRkAXb1ed3Ol_ygTZvQgED-Jf"
+
 YANDEX_CALLBACK_STATE_URL = os.environ.get(
     "YANDEX_CALLBACK_STATE_URL",
     "https://dialogs.yandex.net/api/v1/skills/{skill_id}/callback/state",

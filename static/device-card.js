@@ -18,7 +18,7 @@ const api = {
   remove: (id) => fetch(`/api/device/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
-const REFRESH_INTERVAL = 5000;
+const REFRESH_INTERVAL = 30000;
 const deviceCards = new Map();
 let refreshTimerId = null;
 let refreshInFlight = false;
