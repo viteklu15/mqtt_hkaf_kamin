@@ -148,9 +148,9 @@ def _load_oauth_code(code: str):
 def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
                                     external_id=None):
     access_token = _generate_token(32)
-    new_refresh_token = _generate_token(32)
     access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
     refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
+
     with db() as con:
         if refresh_token:
             row = con.execute(
@@ -159,7 +159,9 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
             ).fetchone()
         else:
             row = None
+
         if row:
+            new_refresh_token = refresh_token
             con.execute(
                 "UPDATE yandex_tokens SET access_token=?, refresh_token=?, scope=?, external_account_id=?,"
                 " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
@@ -175,6 +177,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                 ),
             )
         else:
+            new_refresh_token = _generate_token(32)
             con.execute(
                 "INSERT INTO yandex_tokens (user_id, client_id, access_token, refresh_token, scope, external_account_id,"
                 " expires_at, refresh_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -191,6 +194,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                     _now_iso(),
                 ),
             )
+
     return access_token, new_refresh_token, access_exp
 
 
