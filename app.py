@@ -200,15 +200,19 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
 
 def _issue_new_access_for_token_row(row_id: int, user_id: int, client_id: str, scope: str = None,
                                     external_id: str = None):
-    """Выпускает новый access_token, не трогая refresh_token."""
-    access_token = _generate_token(32)
+    """Продлевает срок действия access_token без его замены."""
+    # Ранее здесь генерировался новый access_token при каждом продлении срока действия.
+    # Яндекс.Станция продолжает использовать выданный ранее токен и не обновляет его
+    # самостоятельно. Если токен внезапно меняется, запросы начинают возвращать 401,
+    # после чего происходит автоматическая отвязка аккаунта примерно через час.
+    # Поэтому ограничиваемся обновлением срока действия существующей записи.
     access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
     with db() as con:
         con.execute(
-            "UPDATE yandex_tokens SET access_token=?, expires_at=?, updated_at=? WHERE id=?",
-            (access_token, access_exp, _now_iso(), row_id),
+            "UPDATE yandex_tokens SET expires_at=?, updated_at=? WHERE id=?",
+            (access_exp, _now_iso(), row_id),
         )
-    return access_token, access_exp
+    return None, access_exp
 
 
 def _get_user_id_from_bearer(auth_header: str):
