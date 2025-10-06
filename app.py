@@ -148,9 +148,9 @@ def _load_oauth_code(code: str):
 def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
                                     external_id=None):
     access_token = _generate_token(32)
+    new_refresh_token = _generate_token(32)
     access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
     refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
-
     with db() as con:
         if refresh_token:
             row = con.execute(
@@ -159,9 +159,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
             ).fetchone()
         else:
             row = None
-
         if row:
-            new_refresh_token = refresh_token
             con.execute(
                 "UPDATE yandex_tokens SET access_token=?, refresh_token=?, scope=?, external_account_id=?,"
                 " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
@@ -177,7 +175,6 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                 ),
             )
         else:
-            new_refresh_token = _generate_token(32)
             con.execute(
                 "INSERT INTO yandex_tokens (user_id, client_id, access_token, refresh_token, scope, external_account_id,"
                 " expires_at, refresh_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -194,25 +191,7 @@ def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, re
                     _now_iso(),
                 ),
             )
-
     return access_token, new_refresh_token, access_exp
-
-
-def _issue_new_access_for_token_row(row_id: int, user_id: int, client_id: str, scope: str = None,
-                                    external_id: str = None):
-    """Продлевает срок действия access_token без его замены."""
-    # Ранее здесь генерировался новый access_token при каждом продлении срока действия.
-    # Яндекс.Станция продолжает использовать выданный ранее токен и не обновляет его
-    # самостоятельно. Если токен внезапно меняется, запросы начинают возвращать 401,
-    # после чего происходит автоматическая отвязка аккаунта примерно через час.
-    # Поэтому ограничиваемся обновлением срока действия существующей записи.
-    access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
-    with db() as con:
-        con.execute(
-            "UPDATE yandex_tokens SET expires_at=?, updated_at=? WHERE id=?",
-            (access_exp, _now_iso(), row_id),
-        )
-    return None, access_exp
 
 
 def _get_user_id_from_bearer(auth_header: str):
@@ -223,31 +202,17 @@ def _get_user_id_from_bearer(auth_header: str):
         return None, None
     with db() as con:
         row = con.execute(
-            "SELECT id, user_id, client_id, scope, external_account_id, expires_at, refresh_expires_at "
-            "FROM yandex_tokens WHERE access_token=?",
+            "SELECT id, user_id, expires_at, refresh_expires_at FROM yandex_tokens WHERE access_token=?",
             (token,),
         ).fetchone()
     if not row:
         return None, None
-
-    exp = _parse_iso(row["expires_at"])
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None, None
     refresh_exp = _parse_iso(row["refresh_expires_at"])
-
     if refresh_exp and refresh_exp < _now_utc():
         return None, None
-
-    if exp and exp < _now_utc():
-        try:
-            _issue_new_access_for_token_row(
-                row_id=row["id"],
-                user_id=row["user_id"],
-                client_id=row["client_id"],
-                scope=row["scope"],
-                external_id=row["external_account_id"],
-            )
-        except Exception:
-            return None, None
-
     return row["user_id"], row["id"]
 
 
@@ -281,7 +246,7 @@ def _has_yandex_links_for_user(user_id: int, con=None) -> bool:
 def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
     if client_id != YANDEX_CLIENT_ID:
         return False
-    if client_secret is not None and client_secret != "" and client_secret != YANDEX_CLIENT_SECRET:
+    if client_secret is not None and client_secret != YANDEX_CLIENT_SECRET:
         return False
     return True
 
@@ -307,7 +272,7 @@ def _fetch_yandex_devices(user_id: int):
         if kind != "dryer":
             continue
         state_payload = _load_state_payload(row["state_json"])
-        power_state = _bool_from_payload(row["on_state"], False)
+        power_state = bool(row["on_state"])
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
@@ -618,7 +583,7 @@ def fetch_user_devices(user_id: int):
         kind = (row["kind"] or "dryer").lower()
         state_payload = _load_state_payload(row["state_json"])
 
-        power_state = _bool_from_payload(row["on_state"], False)
+        power_state = bool(row["on_state"])
         if "on" in state_payload:
             power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
@@ -700,7 +665,7 @@ def _build_device_api_payload(row):
     kind = (row["kind"] or "dryer").lower()
     state_payload = _load_state_payload(row["state_json"])
 
-    power_state = _bool_from_payload(row["on_state"], False)
+    power_state = bool(row["on_state"])
     if "on" in state_payload:
         power_state = _bool_from_payload(state_payload.get("on"), power_state)
 
@@ -981,50 +946,22 @@ def oauth_token():
     client_id = header_client_id or data.get("client_id", "")
     client_secret = header_client_secret or data.get("client_secret")
 
-    incoming_grant = (data.get("grant_type") or "").lower()
-    auth_header_value = request.headers.get("Authorization") or ""
-    headers_auth = "Basic" if auth_header_value.lower().startswith("basic ") else "none"
-    app.logger.warning(
-        "[OAUTH/TOKEN] incoming grant=%s headers_auth=%s",
-        incoming_grant or "none",
-        headers_auth,
-    )
-
     if not _validate_yandex_client(client_id, client_secret):
-        app.logger.warning(
-            "[OAUTH/TOKEN] error status=%s body=%s",
-            401,
-            {"error": "invalid_client"},
-        )
         return jsonify(error="invalid_client"), 401
 
-    grant_type = incoming_grant
+    grant_type = (data.get("grant_type") or "").lower()
     if grant_type == "authorization_code":
         code = data.get("code")
         if not code:
-            app.logger.warning(
-                "[OAUTH/TOKEN] error status=%s body=%s",
-                400,
-                {"error": "invalid_request", "error_description": "code_required"},
-            )
             return jsonify(error="invalid_request", error_description="code_required"), 400
         code_payload = _load_oauth_code(code)
         if not code_payload or code_payload.get("client_id") != client_id:
-            app.logger.warning(
-                "[OAUTH/TOKEN] error status=%s body=%s",
-                400,
-                {"error": "invalid_grant"},
-            )
             return jsonify(error="invalid_grant"), 400
         user_id = code_payload["user_id"]
         scope = code_payload.get("scope")
         external_id = code_payload.get("state")
         access_token, refresh_token, _ = _create_or_update_yandex_tokens(
             user_id, client_id, scope, external_id=external_id
-        )
-        app.logger.warning(
-            "[OAUTH/TOKEN] result 200 grant=%s",
-            grant_type,
         )
         return jsonify(
             access_token=access_token,
@@ -1037,11 +974,6 @@ def oauth_token():
     if grant_type == "refresh_token":
         refresh_token = data.get("refresh_token")
         if not refresh_token:
-            app.logger.warning(
-                "[OAUTH/TOKEN] error status=%s body=%s",
-                400,
-                {"error": "invalid_request", "error_description": "refresh_token_required"},
-            )
             return jsonify(error="invalid_request", error_description="refresh_token_required"), 400
         with db() as con:
             row = con.execute(
@@ -1050,27 +982,13 @@ def oauth_token():
                 (refresh_token, client_id),
             ).fetchone()
         if not row:
-            app.logger.warning(
-                "[OAUTH/TOKEN] error status=%s body=%s",
-                400,
-                {"error": "invalid_grant"},
-            )
             return jsonify(error="invalid_grant"), 400
         refresh_exp = _parse_iso(row["refresh_expires_at"])
         if refresh_exp and refresh_exp < _now_utc():
-            app.logger.warning(
-                "[OAUTH/TOKEN] error status=%s body=%s",
-                400,
-                {"error": "invalid_grant"},
-            )
             return jsonify(error="invalid_grant"), 400
         access_token, new_refresh_token, _ = _create_or_update_yandex_tokens(
             row["user_id"], client_id, row["scope"], refresh_token=refresh_token,
             external_id=row["external_account_id"],
-        )
-        app.logger.warning(
-            "[OAUTH/TOKEN] result 200 grant=%s",
-            grant_type,
         )
         return jsonify(
             access_token=access_token,
@@ -1080,11 +998,6 @@ def oauth_token():
             scope=row["scope"] or "",
         )
 
-    app.logger.warning(
-        "[OAUTH/TOKEN] error status=%s body=%s",
-        400,
-        {"error": "unsupported_grant_type"},
-    )
     return jsonify(error="unsupported_grant_type"), 400
 
 
