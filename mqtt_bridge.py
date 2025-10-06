@@ -11,7 +11,7 @@ ONLINE = {}       # device_id -> bool
 CODE_INDEX = {}   # code -> device_id
 
 # ===== Настройки MQTT =====
-MQTT_HOST = "45.144.221.176"
+MQTT_HOST = "5.129.222.167"
 MQTT_PORT = 1883
 MQTT_USER = "esphkaf"
 MQTT_PASS = "S159357"
