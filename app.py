@@ -5,11 +5,15 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import logging
-import requests
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
+from yandex_callback import (
+    BadCallbackUrlError,
+    YandexCallbackClient,
+    YandexCallbackError,
+)
 
 APP_SECRET = os.environ.get("APP_SECRET", "dev_secret_change_me")
 DB_PATH = "sf.db"
@@ -34,6 +38,16 @@ YANDEX_CALLBACK_STATE_URL = os.environ.get(
 )
 YANDEX_CALLBACK_TIMEOUT = float(os.environ.get("YANDEX_CALLBACK_TIMEOUT", 5.0))
 YANDEX_AUTO_APPROVE = os.environ.get("YANDEX_AUTO_APPROVE", "1").lower() not in {"0", "false", "no"}
+
+
+def _build_yandex_callback_client() -> YandexCallbackClient:
+    return YandexCallbackClient(
+        skill_id=YANDEX_SKILL_ID or "",
+        token=YANDEX_SKILL_TOKEN or "",
+        callback_url_template=YANDEX_CALLBACK_STATE_URL or "",
+        timeout=YANDEX_CALLBACK_TIMEOUT,
+    )
+
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
@@ -362,7 +376,8 @@ def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: s
         )
         return
 
-    if not YANDEX_SKILL_ID or not YANDEX_SKILL_TOKEN:
+    client = _build_yandex_callback_client()
+    if not client.is_configured:
         app.logger.warning(
             "[YA CALLBACK] skipped device=%s reason=skill_not_configured",
             device_id,
@@ -370,8 +385,8 @@ def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: s
         return
 
     try:
-        url = (YANDEX_CALLBACK_STATE_URL or "").format(skill_id=YANDEX_SKILL_ID)
-    except KeyError as exc:
+        url = client.build_url()
+    except BadCallbackUrlError as exc:
         app.logger.warning(
             "[YA CALLBACK] skipped device=%s reason=bad_callback_url error=%s",
             device_id,
@@ -387,19 +402,9 @@ def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: s
         )
         return
 
-    callback_payload = {
-        "ts": int(_now_utc().timestamp()),
-        "payload": {
-            "user_id": str(user_id),
-            "devices": [device_state],
-        },
-    }
-
+    ts = int(_now_utc().timestamp())
+    callback_payload = client.build_callback_body(user_id, device_state, timestamp=ts)
     serialized = json.dumps(callback_payload, ensure_ascii=False)
-    headers = {
-        "Authorization": f"OAuth {YANDEX_SKILL_TOKEN}",
-        "Content-Type": "application/json",
-    }
 
     app.logger.warning(
         "[YA CALLBACK] sending device=%s kind=%s url=%s payload=%s",
@@ -410,12 +415,27 @@ def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: s
     )
 
     try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=callback_payload,
-            timeout=YANDEX_CALLBACK_TIMEOUT,
+        response = client.send_device_state(
+            user_id,
+            device_state,
+            timestamp=ts,
+            body=callback_payload,
+            url=url,
         )
+    except BadCallbackUrlError as exc:
+        app.logger.warning(
+            "[YA CALLBACK] skipped device=%s reason=bad_callback_url error=%s",
+            device_id,
+            exc,
+        )
+        return
+    except YandexCallbackError as exc:
+        app.logger.warning(
+            "[YA CALLBACK] request_failed device=%s error=%s",
+            device_id,
+            exc,
+        )
+        return
     except Exception as exc:
         app.logger.warning(
             "[YA CALLBACK] request_failed device=%s error=%s",
