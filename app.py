@@ -5,8 +5,6 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import logging
-import requests
-from werkzeug.middleware.proxy_fix import ProxyFix
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -23,49 +21,17 @@ YANDEX_LINK_URL = os.environ.get(
     "&dp=2&lang=ru-RU&manufacturer=unknown&model=unknown&os_version=unknown&size=1080%2C1920&uuid=unknown"
 )
 
-YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 365 * 24 * 3600))
-YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 5 * 365 * 24 * 3600))
-YANDEX_SKILL_ID = "7c169e54-a714-4398-9cf2-87f2bb868341"
-YANDEX_SKILL_TOKEN = "y0__xCUs-BsGKP3EyDAwPPAFDDdRkAXb1ed3Ol_ygTZvQgED-Jf"
-
-YANDEX_CALLBACK_STATE_URL = os.environ.get(
-    "YANDEX_CALLBACK_STATE_URL",
-    "https://dialogs.yandex.net/api/v1/skills/{skill_id}/callback/state",
-)
-YANDEX_CALLBACK_TIMEOUT = float(os.environ.get("YANDEX_CALLBACK_TIMEOUT", 5.0))
-YANDEX_AUTO_APPROVE = os.environ.get("YANDEX_AUTO_APPROVE", "1").lower() not in {"0", "false", "no"}
+YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
+YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.logger.setLevel(logging.WARNING)   # чтобы INFO было видно в консоли
-# app.logger.setLevel(logging.INFO)   # чтобы INFO было видно в консоли
 
 # Очереди SSE-обновлений устройств
 DEVICE_EVENT_SUBSCRIBERS = {}
 DEVICE_EVENT_LOCK = threading.Lock()
 SSE_PING_INTERVAL = 15
-
-
-def log_req(tag: str):
-    app.logger.info(
-        "=== %s @ %s path=%s method=%s request_id=%s auth=%s ===",
-        tag,
-        datetime.now().isoformat(),
-        request.path,
-        request.method,
-        request.headers.get("X-Request-Id"),
-        request.headers.get("Authorization"),
-    )
-    if request.is_json:
-        try:
-            body = request.get_json(silent=True)
-        except Exception:
-            body = None
-        app.logger.info(
-            "JSON body: %s",
-            json.dumps(body, ensure_ascii=False, indent=2) if isinstance(body, (dict, list)) else body,
-        )
 
 
 # Доступные режимы камина: устройства поддерживают шесть предустановок,
@@ -169,18 +135,12 @@ def _load_oauth_code(code: str):
     return dict(row)
 
 
-def _calc_expiry(ttl_seconds: int) -> str:
-    if ttl_seconds and ttl_seconds > 0:
-        return (_now_utc() + timedelta(seconds=ttl_seconds)).isoformat()
-    return datetime(9999, 12, 31, 23, 59, 59).isoformat()
-
-
 def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
                                     external_id=None):
     access_token = _generate_token(32)
     new_refresh_token = _generate_token(32)
-    access_exp = _calc_expiry(YANDEX_TOKEN_TTL)
-    refresh_exp = _calc_expiry(YANDEX_REFRESH_TTL)
+    access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
+    refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
     with db() as con:
         if refresh_token:
             row = con.execute(
@@ -238,7 +198,7 @@ def _get_user_id_from_bearer(auth_header: str):
     if not row:
         return None, None
     expires_at = _parse_iso(row["expires_at"])
-    if expires_at and expires_at < _now_utc():
+    if not expires_at or expires_at < _now_utc():
         return None, None
     refresh_exp = _parse_iso(row["refresh_expires_at"])
     if refresh_exp and refresh_exp < _now_utc():
@@ -253,24 +213,6 @@ def _count_yandex_links(user_id: int) -> int:
             (user_id, _now_iso()),
         ).fetchone()
     return int(row["cnt"] if row else 0)
-
-
-def _has_yandex_links_for_user(user_id: int, con=None) -> bool:
-    if not user_id:
-        return False
-    close_conn = False
-    if con is None:
-        con = db()
-        close_conn = True
-    try:
-        row = con.execute(
-            "SELECT 1 FROM yandex_tokens WHERE user_id=? LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        return bool(row)
-    finally:
-        if close_conn and con is not None:
-            con.close()
 
 
 def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
@@ -320,117 +262,6 @@ def _fetch_yandex_devices(user_id: int):
             "program": program_device_value,
         })
     return devices
-
-
-def _build_yandex_callback_device(device_payload: dict):
-    if not device_payload:
-        return None
-    device_id = device_payload.get("device_id") or device_payload.get("id")
-    if not device_id:
-        return None
-
-    kind = (device_payload.get("kind") or "dryer").lower()
-    if kind != "dryer":
-        return None
-
-    if not device_payload.get("online"):
-        return {"id": device_id, "error_code": "DEVICE_UNREACHABLE"}
-
-    program_value = _dryer_program_device_to_yandex(device_payload.get("program"))
-    return {
-        "id": device_id,
-        "capabilities": [
-            {
-                "type": "devices.capabilities.on_off",
-                "state": {"instance": "on", "value": bool(device_payload.get("on"))},
-            },
-            {
-                "type": "devices.capabilities.mode",
-                "state": {"instance": "program", "value": program_value},
-            },
-        ],
-        "properties": [],
-    }
-
-
-def _send_yandex_state_update(user_id: int, device_payload: dict, change_kind: str, has_link: bool = True):
-    device_id = device_payload.get("device_id") if isinstance(device_payload, dict) else None
-    if not has_link:
-        app.logger.warning(
-            "[YA CALLBACK] skipped device=%s reason=no_links",
-            device_id,
-        )
-        return
-
-    if not YANDEX_SKILL_ID or not YANDEX_SKILL_TOKEN:
-        app.logger.warning(
-            "[YA CALLBACK] skipped device=%s reason=skill_not_configured",
-            device_id,
-        )
-        return
-
-    try:
-        url = (YANDEX_CALLBACK_STATE_URL or "").format(skill_id=YANDEX_SKILL_ID)
-    except KeyError as exc:
-        app.logger.warning(
-            "[YA CALLBACK] skipped device=%s reason=bad_callback_url error=%s",
-            device_id,
-            exc,
-        )
-        return
-
-    device_state = _build_yandex_callback_device(device_payload)
-    if not device_state:
-        app.logger.warning(
-            "[YA CALLBACK] skipped device=%s reason=unsupported_payload",
-            device_id,
-        )
-        return
-
-    callback_payload = {
-        "ts": int(_now_utc().timestamp()),
-        "payload": {
-            "user_id": str(user_id),
-            "devices": [device_state],
-        },
-    }
-
-    serialized = json.dumps(callback_payload, ensure_ascii=False)
-    headers = {
-        "Authorization": f"OAuth {YANDEX_SKILL_TOKEN}",
-        "Content-Type": "application/json",
-    }
-
-    app.logger.warning(
-        "[YA CALLBACK] sending device=%s kind=%s url=%s payload=%s",
-        device_id,
-        change_kind,
-        url,
-        serialized,
-    )
-
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=callback_payload,
-            timeout=YANDEX_CALLBACK_TIMEOUT,
-        )
-    except Exception as exc:
-        app.logger.warning(
-            "[YA CALLBACK] request_failed device=%s error=%s",
-            device_id,
-            exc,
-        )
-        return
-
-    app.logger.warning(
-        "[YA CALLBACK] response device=%s status=%s body=%s",
-        device_id,
-        response.status_code,
-        response.text,
-    )
-
 
 # ---------- БД ----------
 def db():
@@ -826,8 +657,6 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
-                has_link = _has_yandex_links_for_user(user_id, con)
-                _send_yandex_state_update(user_id, device_payload, kind, has_link)
             return
         if kind == "state" and isinstance(payload, dict):
             fields, values = [], []
@@ -855,15 +684,12 @@ def _state_to_db(device_id: str, kind: str, payload):
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
-                has_link = _has_yandex_links_for_user(user_id, con)
-                _send_yandex_state_update(user_id, device_payload, kind, has_link)
 
 register_state_handler(_state_to_db)
 
 # ---------- OAuth 2.0 для Яндекс.Алисы ----------
 @app.route("/callback", methods=["GET", "POST"])
 def oauth_callback():
-    log_req("OAUTH_CALLBACK")
     if request.method == "POST":
         if request.mimetype == "application/json":
             body = request.get_json(silent=True) or {}
@@ -912,7 +738,6 @@ def oauth_callback():
 
 @app.route("/oauth/authorize", methods=["GET", "POST"])
 def oauth_authorize():
-    log_req("OAUTH_AUTHORIZE")
     response_type = request.values.get("response_type", "code").lower()
     client_id = request.values.get("client_id", "")
     redirect_uri = request.values.get("redirect_uri", "")
@@ -933,11 +758,6 @@ def oauth_authorize():
             next_url = "/"
         session["post_login_redirect"] = next_url
         return redirect(url_for("index") + "#login")
-
-    if YANDEX_AUTO_APPROVE and request.method == "GET":
-        code, _ = _store_oauth_code(g.user["id"], client_id, redirect_uri, scope, external_id or state)
-        session.pop("post_login_redirect", None)
-        return redirect(_append_query(redirect_uri, {"code": code, "state": state}))
 
     if request.method == "POST":
         decision = request.form.get("decision")
@@ -974,7 +794,6 @@ def _extract_basic_credentials(auth_header: str):
 
 @app.post("/oauth/token")
 def oauth_token():
-    log_req("OAUTH_TOKEN")
     if request.mimetype == "application/json":
         data = request.get_json(silent=True) or {}
     else:
@@ -1093,7 +912,6 @@ def yandex_devices():
 @app.route("/yandex/v1.0/user/devices/query", methods=["POST"])
 @app.route("/v1.0/user/devices/query", methods=["POST"])
 def yandex_devices_query():
-    log_req("YA_QUERY")
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
         app.logger.info("[YA QUERY] unauthorized")
@@ -1148,7 +966,6 @@ def yandex_devices_query():
 @app.route("/yandex/v1.0/user/devices/action", methods=["POST"])
 @app.route("/v1.0/user/devices/action", methods=["POST"])
 def yandex_devices_action():
-    log_req("YA_ACTION")
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
         return _yandex_unauthorized()
@@ -1305,13 +1122,9 @@ def yandex_devices_action():
         results.append(device_result)
 
     return _yandex_response(request_id, {"devices": results})
-@app.route("/v1.0", methods=["GET", "HEAD"])
-def yandex_ping():
-    # можно вернуть что угодно 200 OK
-    return ("OK", 200)
+
 
 @app.post("/yandex/v1.0/user/unlink")
-@app.post("/v1.0/user/unlink")   # <— добавили второй маршрут
 def yandex_unlink():
     body = request.get_json(silent=True) or {}
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
