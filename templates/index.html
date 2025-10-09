@@ -104,7 +104,7 @@
         <div class="glass rounded-3xl border border-white/10 p-5 sm:p-6 md:p-8 shadow-2xl w-full max-w-md">
             {% with msgs = get_flashed_messages() %}
             {% if msgs %}
-            <div class="mb-4 text-sm text-emerald-300">{{ msgs[0] }}</div>
+            <div class="mb-4 text-sm text-red-500">{{ msgs[0] }}</div>
             {% endif %}
             {% endwith %}
 
@@ -172,7 +172,7 @@
         <!-- Сайдбар -->
         <aside class="hidden md:block w-72 shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)]
              bg-neutral-900 border-r border-white/10">
-            <div class="p-4 h-full flex flex-col">
+            <div class="p-4  flex flex-col">
                 <div class="font-bold">УМНЫЙ ДОМ</div>
                 <nav class="mt-6 text-sm space-y-1">
                     <button type="button"

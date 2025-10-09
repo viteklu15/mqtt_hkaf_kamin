@@ -1,10 +1,12 @@
+# app.py — сервер c пушем статуса в Яндекс callback/state
+
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
-import sqlite3, os, json, queue, threading, secrets, base64
+import sqlite3, os, json, queue, threading, secrets, base64, logging, time
 from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
-import logging
+import requests
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -12,6 +14,7 @@ from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
 APP_SECRET = os.environ.get("APP_SECRET", "dev_secret_change_me")
 DB_PATH = "sf.db"
 
+# OAuth Алисы (линковка аккаунта)
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc8005032f76ca5aac")
 YANDEX_CLIENT_SECRET = os.environ.get("YANDEX_CLIENT_SECRET", "82f16ceb5eb4095bf456a523febedb9")
 YANDEX_LINK_URL = os.environ.get(
@@ -20,27 +23,32 @@ YANDEX_LINK_URL = os.environ.get(
     "?app_build_number=unknown&app_id=unknown&app_platform=unknown&app_version=unknown&app_version_name=unknown"
     "&dp=2&lang=ru-RU&manufacturer=unknown&model=unknown&os_version=unknown&size=1080%2C1920&uuid=unknown"
 )
-
-YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 3600))
+YANDEX_TOKEN_TTL = int(os.environ.get("YANDEX_TOKEN_TTL", 10 * 30 * 24 * 3600))
 YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
+
+# Callback/state (ТОЛЬКО для пуша состояний в Алису)
+# --- Временно прописаны напрямую (для тестов) ---
+YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID", "7c169e54-a714-4398-9cf2-87f2bb868341")
+YANDEX_CALLBACK_TOKEN = os.environ.get("YANDEX_CALLBACK_TOKEN", "y0__xCUs-BsGKP3EyDAwPPAFDDdRkAXb1ed3Ol_ygTZvQgED-Jf")
+
+
+def _ya_callback_uri() -> str:
+    return f"https://dialogs.yandex.net/api/v1/skills/{YANDEX_SKILL_ID}/callback/state"
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
-app.logger.setLevel(logging.WARNING)   # чтобы INFO было видно в консоли
+app.logger.setLevel(logging.INFO)
 
 # Очереди SSE-обновлений устройств
 DEVICE_EVENT_SUBSCRIBERS = {}
 DEVICE_EVENT_LOCK = threading.Lock()
 SSE_PING_INTERVAL = 15
 
-
-# Доступные режимы камина: устройства поддерживают шесть предустановок,
-# поэтому генерируем список строковых значений от 1 до 6 для отображения в UI.
+# Доступные режимы
 FIREPLACE_MODE_OPTIONS = [(str(i), str(i)) for i in range(1, 7)]
-FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 4)]
+FIREPLACE_SOUND_OPTIONS = [(str(i), str(i)) for i in range(1, 3+1)]
 
-# Поддерживаемые режимы сушильного шкафа для Алисы (шесть предустановок)
-# Поддерживаемые режимы сушильного шкафа для Алисы (one..six ↔ 1..6)
+# Сушильный шкаф: Алиса 'one'..'six' ↔ девайс '1'..'6'
 DRYER_PROGRAM_MODES = [
     ("one",   "1"),
     ("two",   "2"),
@@ -49,219 +57,17 @@ DRYER_PROGRAM_MODES = [
     ("five",  "5"),
     ("six",   "6"),
 ]
-
-# Алиасы из вашего UI (рус/англ) → «девайсное» значение 1..6
 DRYER_PROGRAM_ALIASES = {
-    # 1 — стандарт
     "standard": "1", "std": "1", "стандарт": "1",
-    # 2 — быстрая
     "fast": "2", "quick": "2", "быстро": "2", "быстрая": "2",
-    # 3 — без нагрева / проветривание
     "noheat": "3", "air": "3", "безнагрева": "3", "без_нагрева": "3", "проветривание": "3",
-    # 4 — умный
     "smart": "4", "умный": "4",
-    # 5 — деликатный / персональный
     "gentle": "5", "деликатный": "5", "personal": "5", "персональный": "5",
-    # 6 — интенсивный
     "intense": "6", "интенсивный": "6",
 }
-
 DRYER_PROGRAM_YA_TO_DEVICE = {ya: device for ya, device in DRYER_PROGRAM_MODES}
 DRYER_PROGRAM_DEVICE_TO_YA = {device: ya for ya, device in DRYER_PROGRAM_MODES}
-DRYER_PROGRAM_DEFAULT_DEVICE = DRYER_PROGRAM_MODES[0][1]
-
-
-
-def _normalize_dryer_program_device_value(value):
-    if value is None:
-        return None
-    raw = str(value).strip()
-    if not raw:
-        return None
-    lower = raw.lower()
-    if lower in DRYER_PROGRAM_ALIASES:
-        return DRYER_PROGRAM_ALIASES[lower]
-    if lower in DRYER_PROGRAM_YA_TO_DEVICE:
-        return DRYER_PROGRAM_YA_TO_DEVICE[lower]
-    if lower in DRYER_PROGRAM_DEVICE_TO_YA:
-        return raw
-    return None
-
-
-def _dryer_program_device_to_yandex(value):
-    normalized = _normalize_dryer_program_device_value(value)
-    if not normalized:
-        normalized = DRYER_PROGRAM_DEFAULT_DEVICE
-    return DRYER_PROGRAM_DEVICE_TO_YA.get(normalized, DRYER_PROGRAM_MODES[0][0])
-
-
-def _generate_token(length: int = 32) -> str:
-    return secrets.token_urlsafe(length)
-
-
-def _cleanup_expired_codes(con):
-    now = _now_iso()
-    con.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
-
-
-def _store_oauth_code(user_id: int, client_id: str, redirect_uri: str, scope=None, state=None):
-    code = _generate_token(24)
-    expires_at = (_now_utc() + timedelta(minutes=5)).isoformat()
-    with db() as con:
-        _cleanup_expired_codes(con)
-        con.execute(
-            "INSERT INTO oauth_codes (code, user_id, client_id, redirect_uri, scope, state, expires_at, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (code, user_id, client_id, redirect_uri, scope, state, expires_at, _now_iso()),
-        )
-    return code, expires_at
-
-
-def _load_oauth_code(code: str):
-    if not code:
-        return None
-    with db() as con:
-        _cleanup_expired_codes(con)
-        row = con.execute(
-            "SELECT code, user_id, client_id, redirect_uri, scope, state, expires_at FROM oauth_codes WHERE code=?",
-            (code,),
-        ).fetchone()
-        if not row:
-            return None
-        con.execute("DELETE FROM oauth_codes WHERE code=?", (code,))
-    expires_at = _parse_iso(row["expires_at"])
-    if not expires_at or expires_at < _now_utc():
-        return None
-    return dict(row)
-
-
-def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None,
-                                    external_id=None):
-    access_token = _generate_token(32)
-    new_refresh_token = _generate_token(32)
-    access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
-    refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
-    with db() as con:
-        if refresh_token:
-            row = con.execute(
-                "SELECT id FROM yandex_tokens WHERE refresh_token=? AND user_id=?",
-                (refresh_token, user_id),
-            ).fetchone()
-        else:
-            row = None
-        if row:
-            con.execute(
-                "UPDATE yandex_tokens SET access_token=?, refresh_token=?, scope=?, external_account_id=?,"
-                " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
-                (
-                    access_token,
-                    new_refresh_token,
-                    scope,
-                    external_id,
-                    access_exp,
-                    refresh_exp,
-                    _now_iso(),
-                    row["id"],
-                ),
-            )
-        else:
-            con.execute(
-                "INSERT INTO yandex_tokens (user_id, client_id, access_token, refresh_token, scope, external_account_id,"
-                " expires_at, refresh_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    user_id,
-                    client_id,
-                    access_token,
-                    new_refresh_token,
-                    scope,
-                    external_id,
-                    access_exp,
-                    refresh_exp,
-                    _now_iso(),
-                    _now_iso(),
-                ),
-            )
-    return access_token, new_refresh_token, access_exp
-
-
-def _get_user_id_from_bearer(auth_header: str):
-    if not auth_header or not auth_header.lower().startswith("bearer "):
-        return None, None
-    token = auth_header.split(None, 1)[1].strip()
-    if not token:
-        return None, None
-    with db() as con:
-        row = con.execute(
-            "SELECT id, user_id, expires_at, refresh_expires_at FROM yandex_tokens WHERE access_token=?",
-            (token,),
-        ).fetchone()
-    if not row:
-        return None, None
-    expires_at = _parse_iso(row["expires_at"])
-    if not expires_at or expires_at < _now_utc():
-        return None, None
-    refresh_exp = _parse_iso(row["refresh_expires_at"])
-    if refresh_exp and refresh_exp < _now_utc():
-        return None, None
-    return row["user_id"], row["id"]
-
-
-def _count_yandex_links(user_id: int) -> int:
-    with db() as con:
-        row = con.execute(
-            "SELECT COUNT(*) AS cnt FROM yandex_tokens WHERE user_id=? AND refresh_expires_at>?",
-            (user_id, _now_iso()),
-        ).fetchone()
-    return int(row["cnt"] if row else 0)
-
-
-def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
-    if client_id != YANDEX_CLIENT_ID:
-        return False
-    if client_secret is not None and client_secret != YANDEX_CLIENT_SECRET:
-        return False
-    return True
-
-
-def _append_query(url: str, params: dict) -> str:
-    params = {k: v for k, v in params.items() if v is not None}
-    if not params:
-        return url
-    separator = '&' if '?' in url else '?'
-    return f"{url}{separator}{urlencode(params)}"
-
-
-def _fetch_yandex_devices(user_id: int):
-    with db() as con:
-        rows = con.execute(
-            "SELECT device_id, name, kind, on_state, program, state_json FROM devices WHERE user_id=?",
-            (user_id,),
-        ).fetchall()
-
-    devices = []
-    for row in rows:
-        kind = (row["kind"] or "dryer").lower()
-        if kind != "dryer":
-            continue
-        state_payload = _load_state_payload(row["state_json"])
-        power_state = bool(row["on_state"])
-        if "on" in state_payload:
-            power_state = _bool_from_payload(state_payload.get("on"), power_state)
-
-        program_value = state_payload.get("program") if isinstance(state_payload, dict) else None
-        if program_value is None:
-            program_value = row["program"]
-        program_device_value = _normalize_dryer_program_device_value(program_value)
-        if not program_device_value:
-            program_device_value = DRYER_PROGRAM_DEFAULT_DEVICE
-        devices.append({
-            "id": row["device_id"],
-            "name": row["name"] or "Сушильный шкаф",
-            "online": bool(ONLINE.get(row["device_id"])),
-            "power": power_state,
-            "program": program_device_value,
-        })
-    return devices
+DRYER_PROGRAM_DEFAULT_DEVICE = DRYER_PROGRAM_MODES[0][1]  # "1"
 
 # ---------- БД ----------
 def db():
@@ -279,7 +85,6 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
-        # Таблица устройств (для MQTT/привязки)
         con.execute("""
         CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,8 +101,6 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """)
-
-        # миграция: если колонка kind отсутствует (старая БД) — добавляем
         cols = {row["name"] for row in con.execute("PRAGMA table_info(devices)")}
         if "kind" not in cols:
             con.execute("ALTER TABLE devices ADD COLUMN kind TEXT NOT NULL DEFAULT 'dryer'")
@@ -319,7 +122,6 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """)
-
         con.execute("""
         CREATE TABLE IF NOT EXISTS yandex_tokens (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -338,14 +140,12 @@ def init_db():
         """)
 init_db()
 
-
+# ---------- Время/утилы ----------
 def _now_utc():
     return datetime.utcnow()
 
-
 def _now_iso():
     return _now_utc().isoformat()
-
 
 def _parse_iso(dt: str):
     if not dt:
@@ -368,7 +168,141 @@ def current_user():
 def load_user_to_g():
     g.user = current_user()
 
-# ---------- Хелперы ----------
+# ---------- Нормализация программ ----------
+def _normalize_dryer_program_device_value(value):
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower in DRYER_PROGRAM_ALIASES:
+        return DRYER_PROGRAM_ALIASES[lower]
+    if lower in DRYER_PROGRAM_YA_TO_DEVICE:
+        return DRYER_PROGRAM_YA_TO_DEVICE[lower]
+    if lower in DRYER_PROGRAM_DEVICE_TO_YA:
+        return raw
+    return None
+
+def _dryer_program_device_to_yandex(value):
+    normalized = _normalize_dryer_program_device_value(value)
+    if not normalized:
+        normalized = DRYER_PROGRAM_DEFAULT_DEVICE
+    return DRYER_PROGRAM_DEVICE_TO_YA.get(normalized, DRYER_PROGRAM_MODES[0][0])
+
+def _device_prog_to_ya(value: str) -> str:
+    norm = _normalize_dryer_program_device_value(value) or DRYER_PROGRAM_DEFAULT_DEVICE
+    return DRYER_PROGRAM_DEVICE_TO_YA.get(norm, DRYER_PROGRAM_MODES[0][0])
+
+# ---------- Линковка OAuth Алиса ----------
+def _generate_token(length: int = 32) -> str:
+    return secrets.token_urlsafe(length)
+
+def _cleanup_expired_codes(con):
+    now = _now_iso()
+    con.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
+
+def _store_oauth_code(user_id: int, client_id: str, redirect_uri: str, scope=None, state=None):
+    code = _generate_token(24)
+    expires_at = (_now_utc() + timedelta(minutes=5)).isoformat()
+    with db() as con:
+        _cleanup_expired_codes(con)
+        con.execute(
+            "INSERT INTO oauth_codes (code, user_id, client_id, redirect_uri, scope, state, expires_at, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, user_id, client_id, redirect_uri, scope, state, expires_at, _now_iso()),
+        )
+    return code, expires_at
+
+def _load_oauth_code(code: str):
+    if not code:
+        return None
+    with db() as con:
+        _cleanup_expired_codes(con)
+        row = con.execute(
+            "SELECT code, user_id, client_id, redirect_uri, scope, state, expires_at FROM oauth_codes WHERE code=?",
+            (code,),
+        ).fetchone()
+        if not row:
+            return None
+        con.execute("DELETE FROM oauth_codes WHERE code=?", (code,))
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None
+    return dict(row)
+
+def _create_or_update_yandex_tokens(user_id: int, client_id: str, scope=None, refresh_token=None, external_id=None):
+    access_token = _generate_token(32)
+    new_refresh_token = _generate_token(32)
+    access_exp = (_now_utc() + timedelta(seconds=YANDEX_TOKEN_TTL)).isoformat()
+    refresh_exp = (_now_utc() + timedelta(seconds=YANDEX_REFRESH_TTL)).isoformat()
+    with db() as con:
+        if refresh_token:
+            row = con.execute(
+                "SELECT id FROM yandex_tokens WHERE refresh_token=? AND user_id=?",
+                (refresh_token, user_id),
+            ).fetchone()
+        else:
+            row = None
+        if row:
+            con.execute(
+                "UPDATE yandex_tokens SET access_token=?, refresh_token=?, scope=?, external_account_id=?,"
+                " expires_at=?, refresh_expires_at=?, updated_at=? WHERE id=?",
+                (access_token, new_refresh_token, scope, external_id, access_exp, refresh_exp, _now_iso(), row["id"]),
+            )
+        else:
+            con.execute(
+                "INSERT INTO yandex_tokens (user_id, client_id, access_token, refresh_token, scope, external_account_id,"
+                " expires_at, refresh_expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, client_id, access_token, new_refresh_token, scope, external_id,
+                 access_exp, refresh_exp, _now_iso(), _now_iso()),
+            )
+    return access_token, new_refresh_token, access_exp
+
+def _get_user_id_from_bearer(auth_header: str):
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        return None, None
+    token = auth_header.split(None, 1)[1].strip()
+    if not token:
+        return None, None
+    with db() as con:
+        row = con.execute(
+            "SELECT id, user_id, expires_at, refresh_expires_at FROM yandex_tokens WHERE access_token=?",
+            (token,),
+        ).fetchone()
+    if not row:
+        return None, None
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None, None
+    refresh_exp = _parse_iso(row["refresh_expires_at"])
+    if refresh_exp and refresh_exp < _now_utc():
+        return None, None
+    return row["user_id"], row["id"]
+
+def _count_yandex_links(user_id: int) -> int:
+    with db() as con:
+        row = con.execute(
+            "SELECT COUNT(*) AS cnt FROM yandex_tokens WHERE user_id=? AND refresh_expires_at>?",
+            (user_id, _now_iso()),
+        ).fetchone()
+    return int(row["cnt"] if row else 0)
+
+def _validate_yandex_client(client_id: str, client_secret=None) -> bool:
+    if client_id != YANDEX_CLIENT_ID:
+        return False
+    if client_secret is not None and client_secret != YANDEX_CLIENT_SECRET:
+        return False
+    return True
+
+def _append_query(url: str, params: dict) -> str:
+    params = {k: v for k, v in params.items() if v is not None}
+    if not params:
+        return url
+    separator = '&' if '?' in url else '?'
+    return f"{url}{separator}{urlencode(params)}"
+
+# ---------- Вспомогатели состояния/пуша ----------
 def _subscribe_device_events(user_id: int):
     if not user_id:
         return None
@@ -376,7 +310,6 @@ def _subscribe_device_events(user_id: int):
     with DEVICE_EVENT_LOCK:
         DEVICE_EVENT_SUBSCRIBERS.setdefault(user_id, set()).add(q)
     return q
-
 
 def _unsubscribe_device_events(user_id: int, q):
     if not user_id or q is None:
@@ -388,7 +321,6 @@ def _unsubscribe_device_events(user_id: int, q):
         listeners.discard(q)
         if not listeners:
             DEVICE_EVENT_SUBSCRIBERS.pop(user_id, None)
-
 
 def _broadcast_device_event(user_id: int, kind: str, device_payload: dict):
     if not user_id or not device_payload:
@@ -404,7 +336,6 @@ def _broadcast_device_event(user_id: int, kind: str, device_payload: dict):
         except queue.Full:
             continue
 
-
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -412,7 +343,6 @@ def login_required(fn):
             return redirect(url_for("index") + "#login")
         return fn(*args, **kwargs)
     return wrapper
-
 
 def _load_state_payload(raw_state):
     if not raw_state:
@@ -422,7 +352,6 @@ def _load_state_payload(raw_state):
     except json.JSONDecodeError:
         return {}
 
-
 def _bool_from_payload(value, default=False):
     if value is None:
         return default
@@ -430,6 +359,84 @@ def _bool_from_payload(value, default=False):
         return value.strip().lower() in {"1", "true", "on", "yes"}
     return bool(value)
 
+def _has_yandex_link(user_id: int) -> bool:
+    try:
+        return _count_yandex_links(user_id) > 0
+    except Exception:
+        return False
+
+def _push_yandex_state(user_id: int, device_id: str, on_state: bool, program_device_value: str):
+    """
+    Отправка стейта в Яндекс (callback/state).
+    Требует: YANDEX_SKILL_ID и YANDEX_CALLBACK_TOKEN; user_id должен быть привязан к Алисе.
+    """
+    if not YANDEX_CALLBACK_TOKEN or not YANDEX_SKILL_ID:
+        return
+    if not _has_yandex_link(user_id):
+        return
+
+    program_ya_value = _device_prog_to_ya(program_device_value)
+    body = {
+        "ts": int(time.time()),
+        "payload": {
+            "user_id": str(user_id),
+            "devices": [
+                {
+                    "id": device_id,
+                    "capabilities": [
+                        {
+                            "type": "devices.capabilities.on_off",
+                            "state": {"instance": "on", "value": bool(on_state)}
+                        },
+                        {
+                            "type": "devices.capabilities.mode",
+                            "state": {"instance": "program", "value": program_ya_value}
+                        }
+                    ],
+                    "properties": []
+                }
+            ]
+        }
+    }
+    headers = {
+        "Authorization": f"OAuth {YANDEX_CALLBACK_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    try:
+        r = requests.post(_ya_callback_uri(), headers=headers, data=json.dumps(body), timeout=5)
+        app.logger.info("[YA CALLBACK] %s prog=%s -> %s %s", device_id, program_ya_value, r.status_code, r.text[:200])
+    except Exception:
+        app.logger.exception("[YA CALLBACK] request failed")
+
+# ---------- Загрузка устройств для Алисы/UI ----------
+def _fetch_yandex_devices(user_id: int):
+    with db() as con:
+        rows = con.execute(
+            "SELECT device_id, name, kind, on_state, program, state_json FROM devices WHERE user_id=?",
+            (user_id,),
+        ).fetchall()
+
+    devices = []
+    for row in rows:
+        kind = (row["kind"] or "dryer").lower()
+        if kind != "dryer":
+            continue
+        state_payload = _load_state_payload(row["state_json"])
+        power_state = bool(row["on_state"])
+        if "on" in state_payload:
+            power_state = _bool_from_payload(state_payload.get("on"), power_state)
+        program_value = state_payload.get("program") if isinstance(state_payload, dict) else None
+        if program_value is None:
+            program_value = row["program"]
+        program_device_value = _normalize_dryer_program_device_value(program_value) or DRYER_PROGRAM_DEFAULT_DEVICE
+        devices.append({
+            "id": row["device_id"],
+            "name": row["name"] or "Сушильный шкаф",
+            "online": bool(ONLINE.get(row["device_id"])),
+            "power": power_state,
+            "program": program_device_value,
+        })
+    return devices
 
 def fetch_user_devices(user_id: int):
     with db() as con:
@@ -461,65 +468,25 @@ def fetch_user_devices(user_id: int):
         }
 
         if kind == "fireplace":
-            mode_value = state_payload.get("mode")
-            if mode_value is None:
-                mode_value = row["program"] or FIREPLACE_MODE_OPTIONS[0][0]
-            else:
-                mode_value = str(mode_value)
-
-            sound_value = state_payload.get("sound")
-            if sound_value is None:
-                sound_value = FIREPLACE_SOUND_OPTIONS[0][0]
-            else:
-                sound_value = str(sound_value)
-
-            backlight = _bool_from_payload(state_payload.get("backlight"), False)
-
+            mode_value = state_payload.get("mode") if state_payload else None
             base.update({
                 "mode_options": FIREPLACE_MODE_OPTIONS,
-                "mode_value": mode_value,
+                "mode_value": str(mode_value or row["program"] or FIREPLACE_MODE_OPTIONS[0][0]),
                 "sound_options": FIREPLACE_SOUND_OPTIONS,
-                "sound_value": sound_value,
-                "backlight": backlight,
+                "sound_value": str((state_payload or {}).get("sound", FIREPLACE_SOUND_OPTIONS[0][0])),
+                "backlight": _bool_from_payload((state_payload or {}).get("backlight"), False),
             })
         else:
-            program_value = state_payload.get("program")
-            if program_value is None:
-                program_value = row["program"] or "standard"
-            else:
-                program_value = str(program_value)
-
-            sound_flag = _bool_from_payload(state_payload.get("sound"), False)
-
-            temp_c = state_payload.get("temp_c")
-            if isinstance(temp_c, (int, float)):
-                temp_c = round(float(temp_c), 1)
-                if float(temp_c).is_integer():
-                    temp_c = int(temp_c)
-            elif temp_c is not None:
-                try:
-                    temp_c = float(temp_c)
-                except (TypeError, ValueError):
-                    temp_c = None
-
-            time_left = state_payload.get("time_left")
-            if isinstance(time_left, (int, float)):
-                total_seconds = int(time_left)
-                minutes, seconds = divmod(max(total_seconds, 0), 60)
-                time_left = f"{minutes:02d}:{seconds:02d}"
-            elif time_left is not None:
-                time_left = str(time_left)
-
+            program_value = state_payload.get("program") if state_payload else None
             base.update({
-                "program_value": program_value,
-                "sound": sound_flag,
-                "temp_c": temp_c,
-                "time_left": time_left,
+                "program_value": str(program_value or row["program"] or "standard"),
+                "sound": _bool_from_payload((state_payload or {}).get("sound"), False),
+                "temp_c": (state_payload or {}).get("temp_c"),
+                "time_left": (state_payload or {}).get("time_left"),
             })
 
         devices.append(base)
     return devices
-
 
 def _build_device_api_payload(row):
     dev_id = row["device_id"]
@@ -560,30 +527,23 @@ def _build_device_api_payload(row):
             "temp_c": state_payload.get("temp_c"),
             "time_left": state_payload.get("time_left"),
         })
-
     return device_info
 
-# ---------- Проверка серийного номера через MQTT индекс ----------
+# ---------- Проверка серийника ----------
 def lookup_claim_status(serial: str, user_id: int, con=None):
-    """Возвращает информацию о статусе устройства по серийному номеру."""
     code = (serial or "").strip().upper()
-
     device_id = CODE_INDEX.get(code)
     online = False
     owner_id = None
 
     if device_id:
         online = bool(ONLINE.get(device_id))
-
         close_conn = False
         if con is None:
             con = db()
             close_conn = True
         try:
-            row = con.execute(
-                "SELECT user_id FROM devices WHERE device_id=?",
-                (device_id,)
-            ).fetchone()
+            row = con.execute("SELECT user_id FROM devices WHERE device_id=?", (device_id,)).fetchone()
             if row:
                 owner_id = row["user_id"]
         finally:
@@ -592,10 +552,7 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
 
         if owner_id is None:
             status = "available"
-            if online:
-                message = "Устройство свободно и готово к подключению."
-            else:
-                message = "Устройство найдено, но сейчас не в сети."
+            message = "Устройство свободно и готово к подключению." if online else "Устройство найдено, но сейчас не в сети."
         elif owner_id == user_id:
             status = "owned_by_you"
             message = "Устройство уже привязано к вашему аккаунту."
@@ -615,7 +572,6 @@ def lookup_claim_status(serial: str, user_id: int, con=None):
         "owner_id": owner_id,
     }
 
-
 def _pair_error_message(error_code: str) -> str:
     code = (error_code or "unknown").strip()
     friendly = {
@@ -624,23 +580,18 @@ def _pair_error_message(error_code: str) -> str:
     }
     return friendly.get(code, code)
 
-
 def _load_device_payload_for_user(con, device_id: str, user_id: int):
     if not user_id:
         return None
     row = con.execute(
-        """
-        SELECT device_id, user_id, serial, name, kind, on_state, program, state_json, last_seen, created_at
-        FROM devices WHERE device_id=?
-        """,
+        "SELECT device_id, user_id, serial, name, kind, on_state, program, state_json, last_seen, created_at FROM devices WHERE device_id=?",
         (device_id,),
     ).fetchone()
     if not row or row["user_id"] != user_id:
         return None
     return _build_device_api_payload(row)
 
-
-# ---------- Обработчик апдейтов от MQTT (пишем состояние в БД) ----------
+# ---------- Обработчик апдейтов от MQTT ----------
 def _state_to_db(device_id: str, kind: str, payload):
     with db() as con:
         row = con.execute(
@@ -650,14 +601,15 @@ def _state_to_db(device_id: str, kind: str, payload):
         if not row:
             return
         user_id = row["user_id"]
+
         if kind == "availability":
             if payload is True:
-                con.execute("UPDATE devices SET last_seen=? WHERE device_id=?",
-                            (datetime.utcnow().isoformat(), device_id))
+                con.execute("UPDATE devices SET last_seen=? WHERE device_id=?", (_now_iso(), device_id))
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
             return
+
         if kind == "state" and isinstance(payload, dict):
             fields, values = [], []
             if "on" in payload:
@@ -677,13 +629,22 @@ def _state_to_db(device_id: str, kind: str, payload):
             fields.append("state_json=?")
             values.append(json.dumps(payload, ensure_ascii=False))
             fields.append("last_seen=?")
-            values.append(datetime.utcnow().isoformat())
+            values.append(_now_iso())
             sql = f"UPDATE devices SET {', '.join(fields)} WHERE device_id=?"
             values.append(device_id)
             con.execute(sql, tuple(values))
+
             device_payload = _load_device_payload_for_user(con, device_id, user_id)
             if device_payload:
                 _broadcast_device_event(user_id, kind, device_payload)
+
+            # Пуш в Яндекс после сохранения в БД
+            try:
+                on_state = _bool_from_payload(payload.get("on"), device_payload.get("on", False))
+                prog_val = payload.get("program") or payload.get("mode") or device_payload.get("program")
+                _push_yandex_state(user_id, device_id, on_state, prog_val)
+            except Exception:
+                app.logger.exception("[YA CALLBACK] from MQTT state failed")
 
 register_state_handler(_state_to_db)
 
@@ -691,10 +652,7 @@ register_state_handler(_state_to_db)
 @app.route("/callback", methods=["GET", "POST"])
 def oauth_callback():
     if request.method == "POST":
-        if request.mimetype == "application/json":
-            body = request.get_json(silent=True) or {}
-        else:
-            body = request.form.to_dict() or {}
+        body = request.get_json(silent=True) or (request.form.to_dict() or {})
     else:
         body = request.args.to_dict() or {}
 
@@ -712,16 +670,11 @@ def oauth_callback():
 
     client_id = code_payload.get("client_id") or body.get("client_id") or YANDEX_CLIENT_ID
     if not _validate_yandex_client(client_id):
-        app.logger.warning(
-            "/callback received code for unexpected client", extra={"client_id": client_id, "state": state}
-        )
+        app.logger.warning("/callback wrong client", extra={"client_id": client_id, "state": state})
         return jsonify(error="unauthorized_client"), 401
 
-    access_token, refresh_token, expires_at = _create_or_update_yandex_tokens(
-        code_payload["user_id"],
-        client_id,
-        code_payload.get("scope"),
-        external_id=code_payload.get("state"),
+    access_token, refresh_token, _ = _create_or_update_yandex_tokens(
+        code_payload["user_id"], client_id, code_payload.get("scope"), external_id=code_payload.get("state"),
     )
 
     response_payload = {
@@ -732,9 +685,7 @@ def oauth_callback():
         "expires_in": YANDEX_TOKEN_TTL,
         "state": state or code_payload.get("state") or "",
     }
-
     return jsonify(response_payload)
-
 
 @app.route("/oauth/authorize", methods=["GET", "POST"])
 def oauth_authorize():
@@ -768,16 +719,9 @@ def oauth_authorize():
         else:
             return redirect(_append_query(redirect_uri, {"error": "access_denied", "state": state}))
 
-    return render_template(
-        "oauth_authorize.html",
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        scope=scope,
-        state=state,
-        external_id=external_id,
-        user=g.user,
-    )
-
+    return render_template("oauth_authorize.html",
+                           client_id=client_id, redirect_uri=redirect_uri,
+                           scope=scope, state=state, external_id=external_id, user=g.user)
 
 def _extract_basic_credentials(auth_header: str):
     if not auth_header or not auth_header.lower().startswith("basic "):
@@ -791,14 +735,9 @@ def _extract_basic_credentials(auth_header: str):
     client_id, client_secret = decoded.split(":", 1)
     return client_id, client_secret
 
-
 @app.post("/oauth/token")
 def oauth_token():
-    if request.mimetype == "application/json":
-        data = request.get_json(silent=True) or {}
-    else:
-        data = request.form.to_dict() or {}
-
+    data = request.get_json(silent=True) or (request.form.to_dict() or {})
     header_client_id, header_client_secret = _extract_basic_credentials(request.headers.get("Authorization"))
     client_id = header_client_id or data.get("client_id", "")
     client_secret = header_client_secret or data.get("client_secret")
@@ -817,16 +756,9 @@ def oauth_token():
         user_id = code_payload["user_id"]
         scope = code_payload.get("scope")
         external_id = code_payload.get("state")
-        access_token, refresh_token, _ = _create_or_update_yandex_tokens(
-            user_id, client_id, scope, external_id=external_id
-        )
-        return jsonify(
-            access_token=access_token,
-            token_type="bearer",
-            expires_in=YANDEX_TOKEN_TTL,
-            refresh_token=refresh_token,
-            scope=scope or "",
-        )
+        access_token, refresh_token, _ = _create_or_update_yandex_tokens(user_id, client_id, scope, external_id=external_id)
+        return jsonify(access_token=access_token, token_type="bearer",
+                       expires_in=YANDEX_TOKEN_TTL, refresh_token=refresh_token, scope=scope or "")
 
     if grant_type == "refresh_token":
         refresh_token = data.get("refresh_token")
@@ -834,8 +766,7 @@ def oauth_token():
             return jsonify(error="invalid_request", error_description="refresh_token_required"), 400
         with db() as con:
             row = con.execute(
-                "SELECT user_id, scope, external_account_id, refresh_expires_at FROM yandex_tokens"
-                " WHERE refresh_token=? AND client_id=?",
+                "SELECT user_id, scope, external_account_id, refresh_expires_at FROM yandex_tokens WHERE refresh_token=? AND client_id=?",
                 (refresh_token, client_id),
             ).fetchone()
         if not row:
@@ -844,31 +775,20 @@ def oauth_token():
         if refresh_exp and refresh_exp < _now_utc():
             return jsonify(error="invalid_grant"), 400
         access_token, new_refresh_token, _ = _create_or_update_yandex_tokens(
-            row["user_id"], client_id, row["scope"], refresh_token=refresh_token,
-            external_id=row["external_account_id"],
+            row["user_id"], client_id, row["scope"], refresh_token=refresh_token, external_id=row["external_account_id"]
         )
-        return jsonify(
-            access_token=access_token,
-            token_type="bearer",
-            expires_in=YANDEX_TOKEN_TTL,
-            refresh_token=new_refresh_token,
-            scope=row["scope"] or "",
-        )
+        return jsonify(access_token=access_token, token_type="bearer",
+                       expires_in=YANDEX_TOKEN_TTL, refresh_token=new_refresh_token, scope=row["scope"] or "")
 
     return jsonify(error="unsupported_grant_type"), 400
-
 
 def _yandex_unauthorized():
     return jsonify(error="invalid_token"), 401
 
-
 def _yandex_response(request_id, payload, status=200):
-    return jsonify({
-        "request_id": request_id or "",
-        "payload": payload,
-    }), status
+    return jsonify({"request_id": request_id or "", "payload": payload}), status
 
-
+# ---------- Яндекс эндпоинты ----------
 @app.route("/yandex/v1.0/user/devices", methods=["POST"])
 @app.route("/v1.0/user/devices", methods=["POST", "GET"])
 def yandex_devices():
@@ -886,10 +806,7 @@ def yandex_devices():
             "name": device["name"],
             "type": "devices.types.other",
             "capabilities": [
-                {
-                    "type": "devices.capabilities.on_off",
-                    "retrievable": True,
-                },
+                {"type": "devices.capabilities.on_off", "retrievable": True},
                 {
                     "type": "devices.capabilities.mode",
                     "retrievable": True,
@@ -902,12 +819,8 @@ def yandex_devices():
             "properties": [],
         })
 
-    payload = {
-        "user_id": str(user_id),
-        "devices": devices,
-    }
+    payload = {"user_id": str(user_id), "devices": devices}
     return _yandex_response(request_id, payload)
-
 
 @app.route("/yandex/v1.0/user/devices/query", methods=["POST"])
 @app.route("/v1.0/user/devices/query", methods=["POST"])
@@ -921,10 +834,7 @@ def yandex_devices_query():
     app.logger.info("[YA QUERY] request: %r", body)
 
     request_id = body.get("request_id") or body.get("requestId")
-    # ВАЖНО: поддерживаем оба варианта — с payload и без
-    requested_devices = (body.get("payload", {}).get("devices")
-                         or body.get("devices")
-                         or [])
+    requested_devices = (body.get("payload", {}).get("devices") or body.get("devices") or [])
 
     devices = {d["id"]: d for d in _fetch_yandex_devices(user_id)}
 
@@ -933,35 +843,20 @@ def yandex_devices_query():
         dev_id = item.get("id")
         current = devices.get(dev_id)
         if not current:
-            results.append({
-                "id": dev_id,
-                "error_code": "DEVICE_UNREACHABLE",
-                "error_message": "Устройство не найдено",
-            })
+            results.append({"id": dev_id, "error_code": "DEVICE_UNREACHABLE", "error_message": "Устройство не найдено"})
             continue
         program_state_value = _dryer_program_device_to_yandex(current.get("program"))
         results.append({
             "id": current["id"],
             "capabilities": [
-                {
-                    "type": "devices.capabilities.on_off",
-                    "state": {"instance": "on", "value": bool(current["power"])},
-                },
-                {
-                    "type": "devices.capabilities.mode",
-                    "state": {"instance": "program", "value": program_state_value},
-                },
+                {"type": "devices.capabilities.on_off", "state": {"instance": "on", "value": bool(current["power"]) }},
+                {"type": "devices.capabilities.mode", "state": {"instance": "program", "value": program_state_value }},
             ],
             "properties": [],
         })
-
     resp_payload = {"devices": results}
     app.logger.info("[YA QUERY] response: %r", resp_payload)
     return _yandex_response(request_id, resp_payload)
-
-
-
-
 
 @app.route("/yandex/v1.0/user/devices/action", methods=["POST"])
 @app.route("/v1.0/user/devices/action", methods=["POST"])
@@ -984,13 +879,7 @@ def yandex_devices_action():
         if not current:
             device_result["capabilities"].append({
                 "type": "devices.capabilities.on_off",
-                "state": {
-                    "instance": "on",
-                    "action_result": {
-                        "status": "ERROR",
-                        "error_code": "DEVICE_NOT_FOUND",
-                    },
-                },
+                "state": {"instance": "on","action_result": {"status": "ERROR","error_code": "DEVICE_NOT_FOUND"}}
             })
             results.append(device_result)
             continue
@@ -1002,57 +891,38 @@ def yandex_devices_action():
             instance = cap_state.get("instance")
 
             if cap_type == "devices.capabilities.on_off" and instance in (None, "on"):
-                desired = cap_state.get("value")
-                desired_bool = _bool_from_payload(desired, False)
+                desired_bool = _bool_from_payload(cap_state.get("value"), False)
                 if not current["online"]:
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.on_off",
-                        "state": {
-                            "instance": "on",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "DEVICE_UNREACHABLE",
-                            },
-                        },
+                        "state": {"instance": "on","action_result": {"status": "ERROR","error_code": "DEVICE_UNREACHABLE"}}
                     })
                     continue
-
                 try:
                     bridge.publish_cmd(dev_id, {"on": desired_bool})
                     _update_device_field(dev_id, "on_state", 1 if desired_bool else 0)
                     _update_device_state_json_fields(dev_id, {"on": desired_bool})
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.on_off",
-                        "state": {
-                            "instance": "on",
-                            "action_result": {
-                                "status": "DONE",
-                            },
-                        },
+                        "state": {"instance": "on","action_result": {"status": "DONE"}}
                     })
+                    # Пуш стейта в Алису после выполнения
+                    try:
+                        _push_yandex_state(user_id, dev_id, desired_bool, current.get("program"))
+                    except Exception:
+                        app.logger.exception("[YA CALLBACK] after on/off action failed")
                 except Exception:
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.on_off",
-                        "state": {
-                            "instance": "on",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "INTERNAL_ERROR",
-                            },
-                        },
+                        "state": {"instance": "on","action_result": {"status": "ERROR","error_code": "INTERNAL_ERROR"}}
                     })
+
             elif cap_type == "devices.capabilities.mode" and instance == "program":
                 desired_value = cap_state.get("value")
                 if not isinstance(desired_value, str):
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
-                        "state": {
-                            "instance": "program",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "INVALID_VALUE",
-                            },
-                        },
+                        "state": {"instance": "program","action_result": {"status": "ERROR","error_code": "INVALID_VALUE"}}
                     })
                     continue
 
@@ -1060,26 +930,14 @@ def yandex_devices_action():
                 if not desired_device_value:
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
-                        "state": {
-                            "instance": "program",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "INVALID_VALUE",
-                            },
-                        },
+                        "state": {"instance": "program","action_result": {"status": "ERROR","error_code": "INVALID_VALUE"}}
                     })
                     continue
 
                 if not current["online"]:
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
-                        "state": {
-                            "instance": "program",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "DEVICE_UNREACHABLE",
-                            },
-                        },
+                        "state": {"instance": "program","action_result": {"status": "ERROR","error_code": "DEVICE_UNREACHABLE"}}
                     })
                     continue
 
@@ -1089,47 +947,33 @@ def yandex_devices_action():
                     _update_device_state_json_fields(dev_id, {"program": desired_device_value})
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
-                        "state": {
-                            "instance": "program",
-                            "action_result": {
-                                "status": "DONE",
-                            },
-                        },
+                        "state": {"instance": "program","action_result": {"status": "DONE"}}
                     })
+                    # Пуш стейта в Алису
+                    try:
+                        on_now = bool(current.get("power"))
+                        _push_yandex_state(user_id, dev_id, on_now, desired_device_value)
+                    except Exception:
+                        app.logger.exception("[YA CALLBACK] after program action failed")
                 except Exception:
                     device_result["capabilities"].append({
                         "type": "devices.capabilities.mode",
-                        "state": {
-                            "instance": "program",
-                            "action_result": {
-                                "status": "ERROR",
-                                "error_code": "INTERNAL_ERROR",
-                            },
-                        },
+                        "state": {"instance": "program","action_result": {"status": "ERROR","error_code": "INTERNAL_ERROR"}}
                     })
             else:
                 device_result["capabilities"].append({
                     "type": cap_type,
-                    "state": {
-                        "instance": instance or "on",
-                        "action_result": {
-                            "status": "ERROR",
-                            "error_code": "INVALID_ACTION",
-                        },
-                    },
+                    "state": {"instance": instance or "on","action_result": {"status": "ERROR","error_code": "INVALID_ACTION"}}
                 })
-
         results.append(device_result)
 
     return _yandex_response(request_id, {"devices": results})
-
 
 @app.post("/yandex/v1.0/user/unlink")
 def yandex_unlink():
     body = request.get_json(silent=True) or {}
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
     if not user_id:
-        # fallback to payload user_id
         payload_user = body.get("payload", {}).get("user_id") if isinstance(body.get("payload"), dict) else None
         if payload_user:
             try:
@@ -1145,7 +989,6 @@ def yandex_unlink():
     request_id = body.get("request_id") or body.get("requestId")
     return _yandex_response(request_id, {"status": "OK"})
 
-
 @app.post("/yandex/unlink_all")
 @login_required
 def yandex_unlink_all_ui():
@@ -1154,57 +997,42 @@ def yandex_unlink_all_ui():
     flash("Все аккаунты Яндекс.Алисы отвязаны.")
     return redirect(url_for("devices"))
 
-
-# ---------- РОУТЫ ----------
+# ---------- Роуты UI/аккаунт ----------
 @app.get("/")
 def index():
     devices = fetch_user_devices(g.user["id"]) if g.user else []
     yandex_count = _count_yandex_links(g.user["id"]) if g.user else 0
-    return render_template(
-        "index.html",
-        user=g.user,
-        devices=devices,
-        year=datetime.now().year,
-        yandex_account_count=yandex_count,
-        yandex_link_url=YANDEX_LINK_URL,
-    )
+    return render_template("index.html",
+                           user=g.user, devices=devices, year=datetime.now().year,
+                           yandex_account_count=yandex_count, yandex_link_url=YANDEX_LINK_URL)
 
 @app.get("/devices")
 @login_required
 def devices():
     devices = fetch_user_devices(g.user["id"]) if g.user else []
     yandex_count = _count_yandex_links(g.user["id"]) if g.user else 0
-    return render_template(
-        "index.html",
-        user=g.user,
-        devices=devices,
-        year=datetime.now().year,
-        yandex_account_count=yandex_count,
-        yandex_link_url=YANDEX_LINK_URL,
-    )
+    return render_template("index.html",
+                           user=g.user, devices=devices, year=datetime.now().year,
+                           yandex_account_count=yandex_count, yandex_link_url=YANDEX_LINK_URL)
 
-# --- Аутентификация ---
 @app.post("/register")
 def register():
     email = (request.form.get("email") or "").strip().lower()
     pwd = request.form.get("password") or ""
     pwd2 = request.form.get("password2") or ""
-
     if not email or len(pwd) < 6 or pwd != pwd2:
         flash("Проверьте email и пароли (минимум 6 символов, пароли должны совпадать).")
         return redirect(url_for("index") + "#register")
-
     with db() as con:
         try:
             cur = con.execute(
                 "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                (email, generate_password_hash(pwd), datetime.utcnow().isoformat())
+                (email, generate_password_hash(pwd), _now_iso())
             )
             uid = cur.lastrowid
         except sqlite3.IntegrityError:
             flash("Такой email уже зарегистрирован.")
             return redirect(url_for("index") + "#register")
-
     session["uid"] = uid
     next_url = session.pop("post_login_redirect", None)
     if next_url and next_url.startswith("/"):
@@ -1231,33 +1059,24 @@ def logout():
     session.clear()
     return redirect(url_for("index"))
 
-# --- Эндпойнты аккаунта (их ждёт твой index.html) ---
 @app.post("/account/password")
 def account_change_password():
     if not g.user:
         return jsonify(ok=False, message="Не авторизован"), 401
     if not request.is_json:
         return jsonify(ok=False, message="Неверный формат"), 400
-
     data = request.get_json(silent=True) or {}
     old_password = (data.get("old_password") or "").strip()
     new_password = (data.get("new_password") or "").strip()
-
     if len(new_password) < 6:
         return jsonify(ok=False, message="Минимум 6 символов"), 400
-
     with db() as con:
         row = con.execute("SELECT password_hash FROM users WHERE id=?", (session["uid"],)).fetchone()
         if not row:
             return jsonify(ok=False, message="Пользователь не найден"), 404
         if not check_password_hash(row["password_hash"], old_password):
             return jsonify(ok=False, message="Текущий пароль неверен"), 400
-
-        con.execute(
-            "UPDATE users SET password_hash=? WHERE id=?",
-            (generate_password_hash(new_password), session["uid"])
-        )
-
+        con.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(new_password), session["uid"]))
     return jsonify(ok=True, message="Пароль обновлён")
 
 @app.post("/account/delete")
@@ -1266,23 +1085,54 @@ def account_delete():
         return jsonify(ok=False, message="Не авторизован"), 401
     if not request.is_json:
         return jsonify(ok=False, message="Неверный формат"), 400
-
     data = request.get_json(silent=True) or {}
     password = (data.get("password") or "").strip()
-
     with db() as con:
         row = con.execute("SELECT password_hash FROM users WHERE id=?", (session["uid"],)).fetchone()
         if not row:
             return jsonify(ok=False, message="Пользователь не найден"), 404
         if not check_password_hash(row["password_hash"], password):
             return jsonify(ok=False, message="Пароль неверен"), 400
-
         con.execute("DELETE FROM users WHERE id=?", (session["uid"],))
-
     session.clear()
     return jsonify(ok=True, message="Аккаунт удалён")
 
-# --- API устройств (привязка по коду, список, команды, удаление) ---
+# ---------- API устройств ----------
+def _get_user_device(device_id: str):
+    if not g.user:
+        return None
+    with db() as con:
+        row = con.execute("SELECT device_id, kind, name FROM devices WHERE user_id=? AND device_id=?",
+                          (g.user["id"], device_id)).fetchone()
+    return dict(row) if row else None
+
+def _update_device_field(device_id: str, field: str, value):
+    with db() as con:
+        con.execute(f"UPDATE devices SET {field}=? WHERE device_id=?", (value, device_id))
+
+def _update_device_state_json_fields(device_id: str, updates: dict):
+    if not updates:
+        return
+    with db() as con:
+        row = con.execute("SELECT state_json FROM devices WHERE device_id=?", (device_id,)).fetchone()
+        if not row:
+            return
+        state_payload = _load_state_payload(row["state_json"])
+        changed = False
+        for key, value in updates.items():
+            if value is None:
+                if key in state_payload:
+                    del state_payload[key]
+                    changed = True
+                continue
+            if state_payload.get(key) != value:
+                state_payload[key] = value
+                changed = True
+        if not changed:
+            return
+        con.execute("UPDATE devices SET state_json=? WHERE device_id=?",
+                    (json.dumps(state_payload, ensure_ascii=False), device_id))
+
 @app.get("/api/devices")
 @login_required
 def api_devices_list():
@@ -1293,7 +1143,6 @@ def api_devices_list():
         """, (g.user["id"],)).fetchall()
     devices = [_build_device_api_payload(r) for r in rows]
     return jsonify(ok=True, devices=devices)
-
 
 @app.get("/api/devices/stream")
 @login_required
@@ -1319,10 +1168,7 @@ def api_devices_stream():
         finally:
             _unsubscribe_device_events(user_id, q)
 
-    headers = {
-        "Cache-Control": "no-cache, no-store, must-revalidate",
-        "X-Accel-Buffering": "no",
-    }
+    headers = {"Cache-Control": "no-cache, no-store, must-revalidate", "X-Accel-Buffering": "no"}
     return Response(stream_with_context(generator()), mimetype="text/event-stream", headers=headers)
 
 @app.post("/api/devices/pair")
@@ -1348,17 +1194,7 @@ def api_devices_pair():
             con.execute("""
                 INSERT INTO devices (user_id, device_id, name, kind, serial, on_state, program, last_seen, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                g.user["id"],
-                device_id,
-                "Сушильный шкаф",
-                "dryer",
-                serial,
-                0,
-                "standard",
-                None,
-                datetime.utcnow().isoformat()
-            ))
+            """, (g.user["id"], device_id, "Сушильный шкаф", "dryer", serial, 0, "standard", None, _now_iso()))
         else:
             update_fields = ["user_id=?", "kind=?", "name=?", "program=?"]
             values = [g.user["id"], "dryer", "Сушильный шкаф", "standard"]
@@ -1371,36 +1207,28 @@ def api_devices_pair():
 
     return jsonify(ok=True, device_id=device_id, name="Сушильный шкаф")
 
-
 @app.post("/api/devices/check_serial")
 @login_required
 def api_devices_check_serial():
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
-
     data = request.get_json(silent=True) or {}
     serial = (data.get("serial") or "").strip().upper()
-
     if len(serial) != 6 or not serial.isalnum():
         return jsonify(ok=False, message="Серийный номер должен состоять из 6 символов"), 400
-
     res = lookup_claim_status(serial, g.user["id"])
     return jsonify(ok=True, **res)
-
 
 @app.post("/api/devices/manual")
 @login_required
 def api_devices_manual_add():
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
-
     data = request.get_json(silent=True) or {}
     kind = (data.get("kind") or "").strip().lower()
     serial = (data.get("serial") or "").strip().upper()
-
     if kind not in {"fireplace", "dryer"}:
         return jsonify(ok=False, message="Неизвестный тип устройства"), 400
-
     if len(serial) != 6 or not serial.isalnum():
         return jsonify(ok=False, message="Серийный номер должен состоять из 6 символов"), 400
 
@@ -1410,7 +1238,6 @@ def api_devices_manual_add():
     with db() as con:
         claim = lookup_claim_status(serial, g.user["id"], con=con)
         status = claim["status"]
-
         if status == "not_found":
             return jsonify(ok=False, message="Устройство не найдено. Проверьте питание и подключение к сети."), 404
         if status == "occupied":
@@ -1432,77 +1259,11 @@ def api_devices_manual_add():
             con.execute("""
                 INSERT INTO devices (user_id, device_id, name, kind, serial, on_state, program, last_seen, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                g.user["id"],
-                device_id,
-                device_name,
-                kind,
-                serial,
-                0,
-                program_default,
-                None,
-                datetime.utcnow().isoformat()
-            ))
+            """, (g.user["id"], device_id, device_name, kind, serial, 0, program_default, None, _now_iso()))
         except sqlite3.IntegrityError:
-            # На случай гонки добавления — обновляем владельца и параметры
-            con.execute(
-                "UPDATE devices SET user_id=?, kind=?, name=?, program=?, serial=? WHERE device_id=?",
-                (g.user["id"], kind, device_name, program_default, serial, device_id),
-            )
-
+            con.execute("UPDATE devices SET user_id=?, kind=?, name=?, program=?, serial=? WHERE device_id=?",
+                        (g.user["id"], kind, device_name, program_default, serial, device_id))
     return jsonify(ok=True, device_id=device_id, kind=kind, name=device_name, serial=serial)
-
-def _get_user_device(device_id: str):
-    if not g.user:
-        return None
-    with db() as con:
-        row = con.execute(
-            "SELECT device_id, kind, name FROM devices WHERE user_id=? AND device_id=?",
-            (g.user["id"], device_id),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def _update_device_field(device_id: str, field: str, value):
-    with db() as con:
-        con.execute(f"UPDATE devices SET {field}=? WHERE device_id=?", (value, device_id))
-
-
-def _update_device_state_json_fields(device_id: str, updates: dict):
-    if not updates:
-        return
-
-    with db() as con:
-        row = con.execute(
-            "SELECT state_json FROM devices WHERE device_id=?",
-            (device_id,),
-        ).fetchone()
-
-        if not row:
-            return
-
-        state_payload = _load_state_payload(row["state_json"])
-        changed = False
-
-        for key, value in updates.items():
-            if value is None:
-                if key in state_payload:
-                    del state_payload[key]
-                    changed = True
-                continue
-
-            if state_payload.get(key) != value:
-                state_payload[key] = value
-                changed = True
-
-        if not changed:
-            return
-
-        con.execute(
-            "UPDATE devices SET state_json=? WHERE device_id=?",
-            (json.dumps(state_payload, ensure_ascii=False), device_id),
-        )
-
 
 @app.post("/api/device/<device_id>/power")
 @login_required
@@ -1510,7 +1271,6 @@ def api_device_power(device_id):
     device = _get_user_device(device_id)
     if not device:
         return jsonify(ok=False, message="Устройство не найдено"), 404
-
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
 
@@ -1519,10 +1279,7 @@ def api_device_power(device_id):
         return jsonify(ok=False, message="Параметр 'on' обязателен"), 400
 
     on_value = data["on"]
-    if isinstance(on_value, str):
-        on_state = on_value.strip().lower() in {"1", "true", "on"}
-    else:
-        on_state = bool(on_value)
+    on_state = on_value.strip().lower() in {"1", "true", "on"} if isinstance(on_value, str) else bool(on_value)
 
     try:
         bridge.publish_cmd(device_id, {"on": on_state})
@@ -1531,8 +1288,17 @@ def api_device_power(device_id):
 
     _update_device_field(device_id, "on_state", 1 if on_state else 0)
     _update_device_state_json_fields(device_id, {"on": on_state})
-    return jsonify(ok=True)
 
+    # Пуш в Яндекс
+    try:
+        with db() as con:
+            row = con.execute("SELECT user_id, program FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            if row:
+                _push_yandex_state(row["user_id"], device_id, on_state, row["program"] or DRYER_PROGRAM_DEFAULT_DEVICE)
+    except Exception:
+        app.logger.exception("[YA CALLBACK] after /power failed")
+
+    return jsonify(ok=True)
 
 @app.post("/api/device/<device_id>/set")
 @login_required
@@ -1550,22 +1316,17 @@ def api_device_set(device_id):
         app.logger.info("[SET] %s -> 400 (empty body)", device_id)
         return jsonify(ok=False, message="Не переданы параметры"), 400
 
-    # Входящие данные
     app.logger.info("[SET] %s incoming: %r", device_id, data)
-
-    # Берём первый переданный параметр
     (key, value), = data.items()
-    raw_key, raw_value = key, value  # для логов до нормализации
+    raw_key, raw_value = key, value
 
-    # Если меняем режим — приводим к «1..6»
     if key in {"program", "mode"} and isinstance(value, str):
         normalized = _normalize_dryer_program_device_value(value)
         if normalized:
             value = normalized
-        key = "program"  # храним и шлём как 'program'
+        key = "program"
 
-    app.logger.info("[SET] %s normalized: %s=%r (raw %s=%r)",
-                    device_id, key, value, raw_key, raw_value)
+    app.logger.info("[SET] %s normalized: %s=%r (raw %s=%r)", device_id, key, value, raw_key, raw_value)
 
     try:
         bridge.publish_cmd(device_id, {key: value})
@@ -1575,15 +1336,22 @@ def api_device_set(device_id):
 
     if key in {"program", "mode"} and isinstance(value, str):
         _update_device_field(device_id, "program", value)
-
     _update_device_state_json_fields(device_id, {key: value})
+
+    # Пуш в Яндекс
+    try:
+        with db() as con:
+            row = con.execute("SELECT user_id, on_state, program FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            if row:
+                on_now = bool(row["on_state"])
+                prog = value if key == "program" and isinstance(value, str) else (row["program"] or DRYER_PROGRAM_DEFAULT_DEVICE)
+                _push_yandex_state(row["user_id"], device_id, on_now, prog)
+    except Exception:
+        app.logger.exception("[YA CALLBACK] after /set failed")
 
     resp = {"ok": True, "key": key, "value": value}
     app.logger.info("[SET] %s OK, response: %r", device_id, resp)
     return jsonify(resp)
-
-
-
 
 @app.post("/api/device/<device_id>/rename")
 @login_required
@@ -1591,23 +1359,15 @@ def api_device_rename(device_id):
     device = _get_user_device(device_id)
     if not device:
         return jsonify(ok=False, message="Устройство не найдено"), 404
-
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
-
     data = request.get_json(silent=True) or {}
     title = (data.get("title") or "").strip()
     if not title:
         return jsonify(ok=False, message="Имя устройства не может быть пустым"), 400
-
     with db() as con:
-        con.execute(
-            "UPDATE devices SET name=? WHERE user_id=? AND device_id=?",
-            (title, g.user["id"], device_id),
-        )
-
+        con.execute("UPDATE devices SET name=? WHERE user_id=? AND device_id=?", (title, g.user["id"], device_id))
     return jsonify(ok=True, title=title)
-
 
 @app.post("/api/device/<device_id>/cmd")
 @login_required
@@ -1615,29 +1375,24 @@ def api_device_cmd(device_id):
     device = _get_user_device(device_id)
     if not device:
         return jsonify(ok=False, message="Устройство не найдено"), 404
-
     if not request.is_json:
         return jsonify(ok=False, message="Тело должно быть JSON"), 400
     payload = request.get_json(silent=True) or {}
-
     try:
         bridge.publish_cmd(device_id, payload)
     except Exception as e:
         return jsonify(ok=False, message=f"MQTT ошибка: {e}"), 502
-
     return jsonify(ok=True)
 
 @app.delete("/api/device/<device_id>")
 @login_required
 def api_device_delete(device_id):
     with db() as con:
-        con.execute("DELETE FROM devices WHERE user_id=? AND device_id=?",
-                    (g.user["id"], device_id))
+        con.execute("DELETE FROM devices WHERE user_id=? AND device_id=?", (g.user["id"], device_id))
     return jsonify(ok=True)
 
 # ---------- Запуск ----------
 if __name__ == "__main__":
-    # Стартуем MQTT-мост один раз перед сервером (Flask 3.x — без before_first_request)
     bridge.start()
-    # Отключаем авто-перезапуск, чтобы мост не стартовал дважды
-    app.run(debug=True, use_reloader=False)
+    # app.run(debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)

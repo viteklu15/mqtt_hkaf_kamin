@@ -1,0 +1,14 @@
+# Базовые зависимости
+Flask==3.0.3
+Werkzeug==3.0.4
+Jinja2==3.1.4
+itsdangerous==2.2.0
+click==8.1.7
+
+requests==2.32.3
+
+# MQTT-клиент (часто нужен mqtt_bridge)
+paho-mqtt==2.1.0
+
+# (опционально для прод-запуска)
+# gunicorn==22.0.0
