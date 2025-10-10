@@ -1171,12 +1171,12 @@ def password_forgot():
         if email_sent:
             message = (
                 f"Ссылка для восстановления отправлена на {email}. "
-                f"Вы также можете перейти по ссылке: {reset_url}"
+                # f"Вы также можете перейти по ссылке: {reset_url}"
             )
         else:
             message = (
                 "Не удалось отправить ссылку для восстановления на указанный email. "
-                f"Вы можете перейти по ссылке: {reset_url}"
+                # f"Вы можете перейти по ссылке: {reset_url}"
             )
         app.logger.info(
             "Password reset requested for %s, valid until %s: %s (email_sent=%s)",
