@@ -1,0 +1,16 @@
+[Unit]
+Description=Flask Alisa Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/alisa_server
+ExecStart=/root/alisa_server/.venv/bin/python /root/alisa_server/app.py
+Restart=always
+RestartSec=5
+User=root
+Environment="PATH=/root/alisa_server/.venv/bin"
+Environment="FLASK_ENV=production"
+
+[Install]
+WantedBy=multi-user.target
