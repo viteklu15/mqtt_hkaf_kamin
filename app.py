@@ -892,6 +892,15 @@ def _yandex_response(request_id, payload, status=200):
     return jsonify({"request_id": request_id or "", "payload": payload}), status
 
 # ---------- Яндекс эндпоинты ----------
+# --- Availability/ping эндпоинт ---
+@app.route("/v1.0", methods=["GET", "HEAD"])
+def yandex_ping():
+    """Простой healthcheck для валидации Яндекса."""
+    if request.method == "HEAD":
+        return "", 200
+    return jsonify(status="ok"), 200
+
+
 @app.route("/yandex/v1.0/user/devices", methods=["POST"])
 @app.route("/v1.0/user/devices", methods=["POST", "GET"])
 def yandex_devices():
@@ -1073,6 +1082,7 @@ def yandex_devices_action():
     return _yandex_response(request_id, {"devices": results})
 
 @app.post("/yandex/v1.0/user/unlink")
+@app.post("/v1.0/user/unlink")
 def yandex_unlink():
     body = request.get_json(silent=True) or {}
     user_id, _ = _get_user_id_from_bearer(request.headers.get("Authorization"))
