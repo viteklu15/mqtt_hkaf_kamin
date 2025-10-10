@@ -1,11 +1,14 @@
 # app.py — сервер c пушем статуса в Яндекс callback/state
 
+
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
 import sqlite3, os, json, queue, threading, secrets, base64, logging, time, smtplib
 from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
+from dotenv import load_dotenv
+load_dotenv()
 import requests
 from email.message import EmailMessage
 
@@ -17,8 +20,8 @@ DB_PATH = "sf.db"
 PASSWORD_RESET_TTL = int(os.environ.get("PASSWORD_RESET_TTL", 3600))  # 1 час по умолчанию
 
 # OAuth Алисы (линковка аккаунта)
-YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc8005032f76ca5aac")
-YANDEX_CLIENT_SECRET = os.environ.get("YANDEX_CLIENT_SECRET", "82f16ceb5eb4095bf456a523febedb9")
+YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID")
+YANDEX_CLIENT_SECRET = os.environ.get("YANDEX_CLIENT_SECRET")
 YANDEX_LINK_URL = os.environ.get(
     "YANDEX_LINK_URL",
     "https://yandex.ru/iot/iot/linking/7c169e54-a714-4398-9cf2-87f2bb868341/"
@@ -30,8 +33,8 @@ YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 
 # Callback/state (ТОЛЬКО для пуша состояний в Алису)
 # --- Временно прописаны напрямую (для тестов) ---
-YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID", "7c169e54-a714-4398-9cf2-87f2bb868341")
-YANDEX_CALLBACK_TOKEN = os.environ.get("YANDEX_CALLBACK_TOKEN", "y0__xCUs-BsGKP3EyDAwPPAFDDdRkAXb1ed3Ol_ygTZvQgED-Jf")
+YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID")
+YANDEX_CALLBACK_TOKEN = os.environ.get("YANDEX_CALLBACK_TOKEN")
 
 # SMTP (отправка писем)
 SMTP_HOST = os.environ.get("SMTP_HOST")
