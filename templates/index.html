@@ -104,7 +104,11 @@
         <div class="glass rounded-3xl border border-white/10 p-5 sm:p-6 md:p-8 shadow-2xl w-full max-w-md">
             {% with msgs = get_flashed_messages() %}
             {% if msgs %}
-            <div class="mb-4 text-sm text-emerald-300">{{ msgs[0] }}</div>
+            <div class="mb-4 text-sm text-emerald-300 space-y-2">
+                {% for msg in msgs %}
+                <div>{{ msg | safe }}</div>
+                {% endfor %}
+            </div>
             {% endif %}
             {% endwith %}
 
@@ -127,6 +131,10 @@
                     <p class="mt-3 text-sm text-neutral-400">
                         Нет аккаунта?
                         <a href="#" id="showRegister" class="underline">Зарегистрироваться</a>
+                    </p>
+                    <p class="mt-2 text-sm text-neutral-400">
+                        Забыли пароль?
+                        <a href="#" id="showRecover" class="underline">Восстановить доступ</a>
                     </p>
                 </form>
             </div>
@@ -158,6 +166,54 @@
                     </p>
                 </form>
             </div>
+
+            <!-- Форма запроса восстановления -->
+            <div id="recoverForm" class="hidden">
+                <form method="post" action="{{ url_for('password_forgot') }}" class="auth-card">
+                    <div class="text-lg font-semibold mb-2">Восстановление пароля</div>
+
+                    <p class="text-sm text-neutral-400 mb-4">
+                        Укажите email, и мы отправим ссылку для сброса пароля. Ссылка также появится ниже при успешной
+                        отправке.
+                    </p>
+
+                    <label class="auth-label mt-0">Email
+                        <input name="email" type="email" required class="auth-input" autocomplete="email">
+                    </label>
+
+                    <button class="auth-button">Отправить ссылку</button>
+
+                    <p class="mt-3 text-sm text-neutral-400">
+                        Вспомнили пароль?
+                        <a href="#" id="recoverBackToLogin" class="underline">Вернуться ко входу</a>
+                    </p>
+                </form>
+            </div>
+
+            {% if reset_token %}
+            <!-- Сброс пароля по ссылке -->
+            <div id="resetForm">
+                <form method="post" action="{{ url_for('reset_password', token=reset_token) }}" class="auth-card">
+                    <div class="text-lg font-semibold mb-2">Новый пароль</div>
+
+                    <p class="text-sm text-neutral-400 mb-4">
+                        Придумайте новый пароль для аккаунта. Ссылка действительна ограниченное время.
+                    </p>
+
+                    <label class="auth-label mt-0">Новый пароль
+                        <input name="password" type="password" minlength="6" required class="auth-input"
+                            autocomplete="new-password">
+                    </label>
+
+                    <label class="auth-label">Повторите пароль
+                        <input name="password2" type="password" minlength="6" required class="auth-input"
+                            autocomplete="new-password">
+                    </label>
+
+                    <button class="auth-button">Сохранить пароль</button>
+                </form>
+            </div>
+            {% endif %}
         </div>
     </section>
 
@@ -309,34 +365,66 @@
             // Переключение логин/регистрация
             const loginForm = document.getElementById("loginForm");
             const registerForm = document.getElementById("registerForm");
+            const recoverForm = document.getElementById("recoverForm");
+            const resetForm = document.getElementById("resetForm");
             const showRegister = document.getElementById("showRegister");
             const showLogin = document.getElementById("showLogin");
             const navRegister = document.getElementById("navRegister");
+            const showRecover = document.getElementById("showRecover");
+            const recoverBackToLogin = document.getElementById("recoverBackToLogin");
+
+            function hideAuthForms() {
+                loginForm?.classList.add("hidden");
+                registerForm?.classList.add("hidden");
+                recoverForm?.classList.add("hidden");
+                resetForm?.classList.add("hidden");
+            }
 
             function openLogin(scroll = false) {
-                if (!loginForm || !registerForm) return;
-                registerForm.classList.add("hidden");
+                if (!loginForm) return;
+                hideAuthForms();
                 loginForm.classList.remove("hidden");
                 if (scroll) loginForm.scrollIntoView({ behavior: "smooth", block: "start" });
                 if (location.hash !== "#login") history.replaceState(null, "", "#login");
             }
 
             function openRegister(scroll = false) {
-                if (!loginForm || !registerForm) return;
-                loginForm.classList.add("hidden");
+                if (!registerForm) return;
+                hideAuthForms();
                 registerForm.classList.remove("hidden");
                 if (scroll) registerForm.scrollIntoView({ behavior: "smooth", block: "start" });
                 if (location.hash !== "#register") history.replaceState(null, "", "#register");
             }
 
+            function openRecover(scroll = false) {
+                if (!recoverForm) return;
+                hideAuthForms();
+                recoverForm.classList.remove("hidden");
+                if (scroll) recoverForm.scrollIntoView({ behavior: "smooth", block: "start" });
+                if (location.hash !== "#recover") history.replaceState(null, "", "#recover");
+            }
+
+            function openReset(scroll = false) {
+                if (!resetForm) return;
+                hideAuthForms();
+                resetForm.classList.remove("hidden");
+                if (scroll) resetForm.scrollIntoView({ behavior: "smooth", block: "start" });
+                if (location.hash !== "#reset") history.replaceState(null, "", "#reset");
+            }
+
             if (showRegister) showRegister.addEventListener("click", e => { e.preventDefault(); openRegister(true); });
             if (showLogin) showLogin.addEventListener("click", e => { e.preventDefault(); openLogin(true); });
             if (navRegister) navRegister.addEventListener("click", e => { e.preventDefault(); openRegister(true); });
+            if (showRecover) showRecover.addEventListener("click", e => { e.preventDefault(); openRecover(true); });
+            if (recoverBackToLogin) recoverBackToLogin.addEventListener("click", e => { e.preventDefault(); openLogin(true); });
 
             function handleHash() {
-                if (!loginForm || !registerForm) return;
+                if (!loginForm && !registerForm && !recoverForm && !resetForm) return;
                 const h = (location.hash || "").toLowerCase();
                 if (h === "#register") openRegister();
+                else if (h === "#recover") openRecover();
+                else if (h === "#reset" && resetForm) openReset();
+                else if (resetForm) openReset();
                 else openLogin();
             }
             window.addEventListener("hashchange", handleHash);
