@@ -1,12 +1,13 @@
 # app.py — сервер c пушем статуса в Яндекс callback/state
 
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
-import sqlite3, os, json, queue, threading, secrets, base64, logging, time
+import sqlite3, os, json, queue, threading, secrets, base64, logging, time, smtplib
 from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
 import requests
+from email.message import EmailMessage
 
 # MQTT-мост
 from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
@@ -31,6 +32,15 @@ YANDEX_REFRESH_TTL = int(os.environ.get("YANDEX_REFRESH_TTL", 30 * 24 * 3600))
 # --- Временно прописаны напрямую (для тестов) ---
 YANDEX_SKILL_ID = os.environ.get("YANDEX_SKILL_ID", "7c169e54-a714-4398-9cf2-87f2bb868341")
 YANDEX_CALLBACK_TOKEN = os.environ.get("YANDEX_CALLBACK_TOKEN", "y0__xCUs-BsGKP3EyDAwPPAFDDdRkAXb1ed3Ol_ygTZvQgED-Jf")
+
+# SMTP (отправка писем)
+SMTP_HOST = os.environ.get("SMTP_HOST")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+SMTP_USER = os.environ.get("SMTP_USER")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD")
+SMTP_FROM = os.environ.get("SMTP_FROM", SMTP_USER or "no-reply@example.com")
+SMTP_USE_TLS = os.environ.get("SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"}
+SMTP_USE_SSL = os.environ.get("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}
 
 
 def _ya_callback_uri() -> str:
@@ -247,6 +257,53 @@ def _load_password_reset(token: str):
     if not expires_at or expires_at < _now_utc():
         return None
     return dict(row)
+
+
+def _send_email(subject: str, body: str, to_email: str) -> bool:
+    if not SMTP_HOST:
+        app.logger.warning("SMTP_HOST не настроен, письмо %s не отправлено", to_email)
+        return False
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = SMTP_FROM
+    message["To"] = to_email
+    message.set_content(body)
+
+    try:
+        if SMTP_USE_SSL:
+            smtp_class = smtplib.SMTP_SSL
+        else:
+            smtp_class = smtplib.SMTP
+        with smtp_class(SMTP_HOST, SMTP_PORT, timeout=10) as smtp:
+            if SMTP_USE_TLS and not SMTP_USE_SSL:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            if SMTP_USER and SMTP_PASSWORD:
+                smtp.login(SMTP_USER, SMTP_PASSWORD)
+            smtp.send_message(message)
+        return True
+    except Exception:
+        app.logger.exception("Ошибка отправки письма на %s", to_email)
+        return False
+
+
+def _send_password_reset_email(email: str, reset_url: str, expires_at: str) -> bool:
+    subject = "Восстановление пароля Smart Fireplace"
+    expires_dt = _parse_iso(expires_at)
+    if expires_dt:
+        expires_text = expires_dt.strftime("%d.%m.%Y %H:%M UTC")
+    else:
+        expires_text = "скоро"
+    body = (
+        "Здравствуйте!\n\n"
+        "Вы запросили восстановление пароля для своего аккаунта.\n"
+        "Перейдите по ссылке, чтобы задать новый пароль:\n"
+        f"{reset_url}\n\n"
+        f"Ссылка действует до {expires_text}. Если вы не запрашивали смену пароля, просто проигнорируйте это письмо.\n"
+    )
+    return _send_email(subject, body, email)
 
 def _store_oauth_code(user_id: int, client_id: str, redirect_uri: str, scope=None, state=None):
     code = _generate_token(24)
@@ -1097,7 +1154,21 @@ def password_forgot():
     if row:
         token, expires_at = _create_password_reset(row["id"])
         reset_url = url_for("password_reset_form", token=token, _external=True)
-        app.logger.info("Password reset requested for %s, valid until %s: %s", email, expires_at, reset_url)
+        email_sent = _send_password_reset_email(email, reset_url, expires_at)
+        if email_sent:
+            message = "Если такой email зарегистрирован, мы отправили ссылку для восстановления на почту."
+        else:
+            message = (
+                "Если такой email зарегистрирован, мы создали ссылку для восстановления. "
+                "Не удалось отправить письмо, воспользуйтесь ссылкой ниже."
+            )
+        app.logger.info(
+            "Password reset requested for %s, valid until %s: %s (email_sent=%s)",
+            email,
+            expires_at,
+            reset_url,
+            email_sent,
+        )
         message += f" Вы также можете перейти по ссылке: {reset_url}"
     flash(message)
     return redirect(url_for("index") + "#forgot")
