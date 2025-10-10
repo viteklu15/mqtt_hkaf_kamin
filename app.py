@@ -13,6 +13,7 @@ from mqtt_bridge import bridge, ONLINE, CODE_INDEX, register_state_handler
 
 APP_SECRET = os.environ.get("APP_SECRET", "dev_secret_change_me")
 DB_PATH = "sf.db"
+PASSWORD_RESET_TTL = int(os.environ.get("PASSWORD_RESET_TTL", 3600))  # 1 час по умолчанию
 
 # OAuth Алисы (линковка аккаунта)
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "dbe5273a922045bc8005032f76ca5aac")
@@ -83,6 +84,17 @@ def init_db():
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT NOT NULL
+        )
+        """)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            used_at TEXT DEFAULT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """)
         con.execute("""
@@ -201,6 +213,40 @@ def _generate_token(length: int = 32) -> str:
 def _cleanup_expired_codes(con):
     now = _now_iso()
     con.execute("DELETE FROM oauth_codes WHERE expires_at < ?", (now,))
+
+def _cleanup_expired_password_resets(con):
+    now_iso = _now_iso()
+    con.execute("DELETE FROM password_resets WHERE expires_at < ?", (now_iso,))
+
+def _create_password_reset(user_id: int):
+    token = _generate_token(24)
+    expires_at = (_now_utc() + timedelta(seconds=PASSWORD_RESET_TTL)).isoformat()
+    with db() as con:
+        _cleanup_expired_password_resets(con)
+        con.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+        con.execute(
+            "INSERT INTO password_resets (user_id, token, expires_at, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, token, expires_at, _now_iso()),
+        )
+    return token, expires_at
+
+def _load_password_reset(token: str):
+    if not token:
+        return None
+    with db() as con:
+        _cleanup_expired_password_resets(con)
+        row = con.execute(
+            "SELECT id, user_id, token, expires_at, used_at FROM password_resets WHERE token=?",
+            (token,),
+        ).fetchone()
+    if not row:
+        return None
+    if row["used_at"]:
+        return None
+    expires_at = _parse_iso(row["expires_at"])
+    if not expires_at or expires_at < _now_utc():
+        return None
+    return dict(row)
 
 def _store_oauth_code(user_id: int, client_id: str, redirect_uri: str, scope=None, state=None):
     code = _generate_token(24)
@@ -1039,6 +1085,23 @@ def register():
         return redirect(next_url, code=303)
     return redirect(url_for("devices"), code=303)
 
+@app.post("/password/forgot")
+def password_forgot():
+    email = (request.form.get("email") or "").strip().lower()
+    if not email:
+        flash("Укажите email для восстановления пароля.")
+        return redirect(url_for("index") + "#forgot")
+    with db() as con:
+        row = con.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+    message = "Если такой email зарегистрирован, мы отправили ссылку для восстановления."
+    if row:
+        token, expires_at = _create_password_reset(row["id"])
+        reset_url = url_for("password_reset_form", token=token, _external=True)
+        app.logger.info("Password reset requested for %s, valid until %s: %s", email, expires_at, reset_url)
+        message += f" Вы также можете перейти по ссылке: {reset_url}"
+    flash(message)
+    return redirect(url_for("index") + "#forgot")
+
 @app.post("/login")
 def login():
     email = (request.form.get("email") or "").strip().lower()
@@ -1058,6 +1121,35 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("index"))
+
+@app.get("/password/reset/<token>")
+def password_reset_form(token):
+    entry = _load_password_reset(token)
+    if not entry:
+        flash("Ссылка недействительна или устарела. Запросите восстановление ещё раз.")
+        return redirect(url_for("index") + "#forgot")
+    return render_template("reset_password.html", token=token)
+
+@app.post("/password/reset/<token>")
+def password_reset(token):
+    entry = _load_password_reset(token)
+    if not entry:
+        flash("Ссылка недействительна или устарела. Запросите восстановление ещё раз.")
+        return redirect(url_for("index") + "#forgot")
+    pwd = (request.form.get("password") or "").strip()
+    pwd2 = (request.form.get("password2") or "").strip()
+    if len(pwd) < 6 or pwd != pwd2:
+        flash("Пароли должны совпадать и содержать минимум 6 символов.")
+        return redirect(url_for("password_reset_form", token=token))
+    password_hash = generate_password_hash(pwd)
+    with db() as con:
+        con.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, entry["user_id"]))
+        con.execute(
+            "UPDATE password_resets SET used_at=?, expires_at=? WHERE id=?",
+            (_now_iso(), _now_iso(), entry["id"]),
+        )
+    flash("Пароль обновлён. Теперь можно войти.")
+    return redirect(url_for("index") + "#login")
 
 @app.post("/account/password")
 def account_change_password():
