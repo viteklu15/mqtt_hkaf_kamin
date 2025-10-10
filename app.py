@@ -1,6 +1,7 @@
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify
 import sqlite3, os
-from datetime import datetime
+from datetime import datetime, timedelta
+import secrets
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -12,6 +13,9 @@ DB_PATH = "sf.db"
 
 app = Flask(__name__)
 app.secret_key = APP_SECRET
+
+# Сколько живёт токен восстановления пароля
+RESET_TOKEN_TTL = timedelta(hours=1)
 
 # ---------- БД ----------
 def db():
@@ -29,6 +33,16 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+        """)
         # Таблица устройств (для MQTT/привязки)
         con.execute("""
         CREATE TABLE IF NOT EXISTS devices (
@@ -43,6 +57,14 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )
         """)
+
+
+def cleanup_expired_resets(con):
+    """Удаляет просроченные токены восстановления."""
+    con.execute(
+        "DELETE FROM password_resets WHERE expires_at < ?",
+        (datetime.utcnow().isoformat(),),
+    )
 init_db()
 
 # ---------- Текущий пользователь ----------
@@ -140,6 +162,98 @@ def login():
             return redirect(url_for("index") + "#login")
         session["uid"] = row["id"]
     return redirect(url_for("devices"), code=303)
+
+
+@app.post("/password/forgot")
+def password_forgot():
+    email = (request.form.get("email") or "").strip().lower()
+    if not email:
+        flash("Укажите email для восстановления.")
+        return redirect(url_for("index") + "#recover")
+
+    token = None
+    with db() as con:
+        cleanup_expired_resets(con)
+        row = con.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
+        if row:
+            user_id = row["id"]
+            con.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+            token = secrets.token_urlsafe(32)
+            expires_at = (datetime.utcnow() + RESET_TOKEN_TTL).isoformat()
+            now_iso = datetime.utcnow().isoformat()
+            con.execute(
+                "INSERT INTO password_resets (user_id, token, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, token, expires_at, now_iso),
+            )
+
+    flash("Если email зарегистрирован, мы отправили ссылку для восстановления.")
+    if token:
+        reset_link = url_for("reset_password", token=token, _external=True)
+        app.logger.info("Password reset link for %s: %s", email, reset_link)
+        flash(
+            "Ссылка для восстановления: "
+            f"<a class='underline' href='{reset_link}'>{reset_link}</a>"
+        )
+
+    return redirect(url_for("index") + "#recover")
+
+
+@app.route("/reset/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    with db() as con:
+        cleanup_expired_resets(con)
+        row = con.execute(
+            "SELECT user_id, expires_at FROM password_resets WHERE token=?",
+            (token,),
+        ).fetchone()
+
+    if not row:
+        flash("Ссылка для восстановления недействительна или устарела.")
+        return redirect(url_for("index") + "#login")
+
+    expires_at = datetime.fromisoformat(row["expires_at"])
+    if expires_at < datetime.utcnow():
+        flash("Ссылка для восстановления недействительна или устарела.")
+        return redirect(url_for("index") + "#login")
+
+    if request.method == "GET":
+        return render_template(
+            "index.html",
+            user=g.user,
+            year=datetime.now().year,
+            reset_token=token,
+        )
+
+    pwd = (request.form.get("password") or "").strip()
+    pwd2 = (request.form.get("password2") or "").strip()
+    if len(pwd) < 6 or pwd != pwd2:
+        flash("Пароли должны совпадать и содержать минимум 6 символов.")
+        return redirect(url_for("reset_password", token=token))
+
+    with db() as con:
+        cleanup_expired_resets(con)
+        row = con.execute(
+            "SELECT user_id, expires_at FROM password_resets WHERE token=?",
+            (token,),
+        ).fetchone()
+        if not row:
+            flash("Ссылка для восстановления недействительна или устарела.")
+            return redirect(url_for("index") + "#login")
+        expires_at = datetime.fromisoformat(row["expires_at"])
+        if expires_at < datetime.utcnow():
+            flash("Ссылка для восстановления недействительна или устарела.")
+            return redirect(url_for("index") + "#login")
+        user_id = row["user_id"]
+        con.execute(
+            "UPDATE users SET password_hash=? WHERE id=?",
+            (generate_password_hash(pwd), user_id),
+        )
+        con.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+
+    session["uid"] = user_id
+    flash("Пароль обновлён, вы вошли в систему.")
+    return redirect(url_for("devices"), code=303)
+
 
 @app.get("/logout")
 def logout():
