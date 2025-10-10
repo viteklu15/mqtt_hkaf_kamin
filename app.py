@@ -1163,17 +1163,20 @@ def password_forgot():
         return redirect(url_for("index") + "#forgot")
     with db() as con:
         row = con.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-    message = "Если такой email зарегистрирован, мы отправили ссылку для восстановления."
+    message = "Указанный email не зарегистрирован."
     if row:
         token, expires_at = _create_password_reset(row["id"])
         reset_url = url_for("password_reset_form", token=token, _external=True)
         email_sent = _send_password_reset_email(email, reset_url, expires_at)
         if email_sent:
-            message = "Если такой email зарегистрирован, мы отправили ссылку для восстановления на почту."
+            message = (
+                f"Ссылка для восстановления отправлена на {email}. "
+                f"Вы также можете перейти по ссылке: {reset_url}"
+            )
         else:
             message = (
-                "Если такой email зарегистрирован, мы создали ссылку для восстановления. "
-                "Не удалось отправить письмо, воспользуйтесь ссылкой ниже."
+                "Не удалось отправить ссылку для восстановления на указанный email. "
+                f"Вы можете перейти по ссылке: {reset_url}"
             )
         app.logger.info(
             "Password reset requested for %s, valid until %s: %s (email_sent=%s)",
@@ -1182,7 +1185,6 @@ def password_forgot():
             reset_url,
             email_sent,
         )
-        message += f" Вы также можете перейти по ссылке: {reset_url}"
     flash(message)
     return redirect(url_for("index") + "#forgot")
 
