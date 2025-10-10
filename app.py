@@ -1558,4 +1558,5 @@ def api_device_delete(device_id):
 if __name__ == "__main__":
     bridge.start()
     # app.run(debug=True, use_reloader=False)
-    app.run(host="0.0.0.0", port=80, debug=True, use_reloader=False)
+    # app.run(host="0.0.0.0", port=80, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
