@@ -1,14 +1,14 @@
 # app.py — сервер c пушем статуса в Яндекс callback/state
 
-
+from dotenv import load_dotenv
+load_dotenv()
 from flask import Flask, request, redirect, url_for, session, render_template, flash, g, jsonify, Response, stream_with_context
 import sqlite3, os, json, queue, threading, secrets, base64, logging, time, smtplib
 from datetime import datetime, timedelta
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from urllib.parse import urlencode
-from dotenv import load_dotenv
-load_dotenv()
+
 import requests
 from email.message import EmailMessage
 

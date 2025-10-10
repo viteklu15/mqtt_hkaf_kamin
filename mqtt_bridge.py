@@ -1,4 +1,5 @@
 # mqtt_bridge.py
+import os
 import json
 import threading
 import time
@@ -10,12 +11,11 @@ import paho.mqtt.client as mqtt
 ONLINE = {}       # device_id -> bool
 CODE_INDEX = {}   # code -> device_id
 
-# ===== Настройки MQTT =====
-MQTT_HOST = "5.129.222.167"
-MQTT_PORT = 1883
-MQTT_USER = "esphkaf"
-MQTT_PASS = "S159357"
-KEEPALIVE = 60
+MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_USER = os.getenv("MQTT_USER", "")
+MQTT_PASS = os.getenv("MQTT_PASS", "")
+KEEPALIVE = int(os.getenv("KEEPALIVE", 60))
 
 def topic_state(device_id: str) -> str:
     return f"devices/{device_id}/state"
