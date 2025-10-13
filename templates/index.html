@@ -176,7 +176,7 @@
                 <form method="post" action="{{ url_for('password_forgot') }}" class="auth-card">
                     <div class="text-lg font-semibold mb-2">Восстановление пароля</div>
                     <p class="text-sm text-neutral-400 mb-3">
-                        Укажите email, мы отправим ссылку для сброса и покажем её ниже.
+                        Укажите email, мы отправим ссылку для сброса.
                     </p>
                     <label class="auth-label mt-0">Email
                         <input name="email" type="email" required class="auth-input" autocomplete="email">
@@ -235,7 +235,7 @@
                         data-tab-target="yandex">Яндекс.Алиса</button>
                     <div class="px-3 py-2 rounded-lg hover:bg-white/5">Поддержка</div>
                 </nav>
-                <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div>
+                <!-- <div class="mt-auto text-xs text-neutral-500 px-3 pt-10">Версия 3.10</div> -->
             </div>
         </aside>
 
@@ -332,14 +332,14 @@
             class="relative mx-auto my-12 w-full max-w-md bg-neutral-900 border border-white/10 rounded-2xl p-6 shadow-xl">
             <div data-step="choose">
                 <h3 class="text-lg font-semibold">Выберите устройство</h3>
-                <p class="mt-2 text-sm text-neutral-400">Какой прибор вы подключаете?</p>
+                <p class="mt-2 text-sm text-neutral-400">Какое устройство вы подключаете?</p>
                 <div class="mt-4 space-y-3">
-                    <button type="button"
+                    <!-- <button type="button"
                         class="w-full px-4 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-left transition"
                         data-kind-btn="fireplace">
                         <div class="font-semibold">Камин</div>
                         <div class="text-sm text-neutral-400">Электрокамин Schönes Feuer</div>
-                    </button>
+                    </button> -->
                     <button type="button"
                         class="w-full px-4 py-3 rounded-xl bg-white/10 hover:bg-white/15 text-left transition"
                         data-kind-btn="dryer">
