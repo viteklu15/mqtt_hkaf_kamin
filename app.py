@@ -701,12 +701,22 @@ def _load_device_payload_for_user(con, device_id: str, user_id: int):
 def _state_to_db(device_id: str, kind: str, payload):
     with db() as con:
         row = con.execute(
-            "SELECT id, user_id FROM devices WHERE device_id=?",
+            "SELECT id, user_id, on_state, program, state_json FROM devices WHERE device_id=?",
             (device_id,),
         ).fetchone()
         if not row:
             return
         user_id = row["user_id"]
+
+        prev_state_payload = _load_state_payload(row["state_json"])
+        prev_on_state = _bool_from_payload(prev_state_payload.get("on"), bool(row["on_state"]))
+        prev_program_device = None
+        if isinstance(prev_state_payload.get("program"), str) and prev_state_payload.get("program"):
+            prev_program_device = prev_state_payload.get("program")
+        elif isinstance(prev_state_payload.get("mode"), str) and prev_state_payload.get("mode"):
+            prev_program_device = prev_state_payload.get("mode")
+        elif isinstance(row["program"], str) and row["program"]:
+            prev_program_device = row["program"]
 
         if kind == "availability":
             if payload is True:
@@ -728,6 +738,14 @@ def _state_to_db(device_id: str, kind: str, payload):
             elif isinstance(payload.get("mode"), str) and payload.get("mode"):
                 program_value = payload["mode"]
 
+            new_on_state = prev_on_state
+            if "on" in payload:
+                new_on_state = _bool_from_payload(payload.get("on"), prev_on_state)
+
+            new_program_device = prev_program_device
+            if program_value is not None:
+                new_program_device = program_value
+
             if program_value is not None:
                 fields.append("program=?")
                 values.append(program_value)
@@ -745,10 +763,16 @@ def _state_to_db(device_id: str, kind: str, payload):
                 _broadcast_device_event(user_id, kind, device_payload)
 
             # Пуш в Яндекс после сохранения в БД
+            should_push = (new_on_state != prev_on_state) or (new_program_device != prev_program_device)
             try:
-                on_state = _bool_from_payload(payload.get("on"), device_payload.get("on", False))
-                prog_val = payload.get("program") or payload.get("mode") or device_payload.get("program")
-                _push_yandex_state(user_id, device_id, on_state, prog_val)
+                if should_push and device_payload:
+                    on_state = new_on_state if "on" in payload else device_payload.get("on", prev_on_state)
+                    prog_val = new_program_device
+                    if prog_val is None:
+                        prog_val = payload.get("program") or payload.get("mode")
+                    if prog_val is None and device_payload:
+                        prog_val = device_payload.get("program")
+                    _push_yandex_state(user_id, device_id, on_state, prog_val)
             except Exception:
                 app.logger.exception("[YA CALLBACK] from MQTT state failed")
 
